@@ -3,6 +3,9 @@
 Jeu inspiré d'Among Us (designs originaux, rendu 2.5D, déplacement libre en temps réel) où **6 crewmates IA et 1 imposteur IA**
 sont entraînés par **MAPPO** (Multi-Agent PPO, entraînement centralisé / exécution décentralisée). Tu peux aussi jouer toi-même.
 
+> Projet de fan, non commercial, sans lien avec Innersloth. « Among Us » est une marque d'Innersloth LLC ; ce dépôt
+> n'en reprend aucun élément graphique ni sonore.
+
 ## Installation
 ```bash
 pip install -r requirements.txt      # numpy + pygame suffisent pour JOUER ; torch + matplotlib pour ENTRAÎNER
