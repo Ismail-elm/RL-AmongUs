@@ -1,0 +1,5 @@
+numpy
+pygame
+# entraînement uniquement (train_mappo.py) :
+torch
+matplotlib

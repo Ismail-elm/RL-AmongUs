@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Sorties d'entraînement (checkpoints, journaux) : volumineuses et réécrites en continu.
+# Le modèle à utiliser pour jouer est copié dans models/.
+runs/
+
+# Éditeurs / système
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
