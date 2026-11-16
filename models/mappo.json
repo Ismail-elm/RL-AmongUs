@@ -1,5 +1,6 @@
 {
-  "iter": 467,
-  "games": 59776,
-  "hidden": 128
+  "iter": 600,
+  "games": 76800,
+  "hidden": 128,
+  "vote": "learned"
 }
