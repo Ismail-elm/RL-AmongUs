@@ -34,7 +34,7 @@ python train_mappo.py --iters 1500 --games 128 --out runs/main
 - Autres options : `--hidden 128` (taille des réseaux), `--lr`, `--lr-end`, `--ent`, `--ent-end`, `--eval-every`, `--snap-every`.
 - Sorties dans `runs/main/` : `latest.npz` (acteurs, c'est ce que lit le jeu), `ckpt_XXXX.npz` tous les 25 itérations,
   `log.csv` (courbes). Pour jouer avec le résultat : `cp runs/main/latest.npz models/mappo.npz`.
-- Un modèle **partiellement entraîné** (iter. 467 / ~60 000 parties) est fourni dans `models/mappo.npz`.
+- Le modèle fourni dans `models/mappo.npz` contient les réseaux de déplacement et de vote (voir Résultats).
 ```bash
 python plot_training.py runs/main        # results/training_curves.png
 python evaluate_mappo.py --n 200         # results/evaluation.md (matrice équipes × imposteurs, IC 95 %)
@@ -85,16 +85,28 @@ vote est soit une règle heuristique (`env.py`, défaut), soit appris (voir ci-d
   −0,5 contre un innocent) : sans lui, des votes dispersés n'éjectent personne et tous apprennent à passer.
 - Inférence en **numpy pur** (`amongus/ai/policy.py`) : le jeu n'a pas besoin de PyTorch.
 
-## Résultats du modèle fourni (iter. 467, 100 parties/case, % de victoires des crewmates)
+## Résultats du modèle fourni (500 parties/case, % de victoires des crewmates, IC 95 %)
+Le modèle de `models/mappo.npz` : 1500 itérations sans vote appris (192 000 parties), puis 600 itérations avec le vote
+appris, l'imposteur pouvant signaler (76 800 parties).
+
 | Équipe \ Imposteur | Imp MAPPO | Imp scripté | Imp prudent | Imp aléatoire |
 |---|---|---|---|---|
-| Crew MAPPO | 46% ±10 | 81% ±8 | 69% ±9 | 96% ±4 |
-| Crew scripté | 53% ±10 | 80% ±8 | 66% ±9 | 98% ±3 |
-| Crew aléatoire | 12% ±6 | 55% ±10 | 33% ±9 | 42% ±10 |
+| Crew MAPPO | 68% ±4 | 98% ±1 | 90% ±3 | 95% ±2 |
+| Crew scripté | 49% ±4 | 86% ±3 | 71% ±4 | 98% ±1 |
+| Crew aléatoire | 10% ±3 | 53% ±4 | 36% ±4 | 42% ±4 |
 
-Lecture honnête : l'**imposteur MAPPO est nettement meilleur** que les imposteurs scriptés (46-53 % de victoires crewmates
-contre 66-81 %). Les **crewmates MAPPO font jeu égal avec l'équipe scriptée** (« fonce sur ses tâches ») mais ne la dépassent pas
-encore : l'entraînement n'est qu'à ~30 % du plan (1500 itérations) et les courbes montaient encore. Détails : `results/`.
+Lecture honnête :
+- **Le vote appris est ce qui fait la différence.** Avant lui (itération 1500, vote heuristique), les crewmates MAPPO
+  plafonnaient à 41 % contre l'imposteur MAPPO et faisaient jeu égal avec l'équipe scriptée contre les imposteurs
+  scriptés (87 % / 76 %) : ils n'avaient presque aucune décision à prendre. Voir `results/eval_iter1500/`.
+- **L'imposteur a appris à signaler ses propres victimes.** Sur 600 parties entre les deux IA, il signale lui-même 12 %
+  des corps ; il n'est alors éjecté que dans 39 % des réunions (81 % quand c'est un crewmate qui signale) et un innocent
+  l'est dans 46 %. Les crewmates font encore trop confiance à celui qui signale.
+- **Limites.** L'imposteur s'est spécialisé contre le vote appris : il est moins fort contre l'équipe scriptée (49 % de
+  victoires crewmates) que celui d'avant le vote (35 %). Les témoignages restent honnêtes et produits par le moteur :
+  l'imposteur ne peut pas mentir, seulement se taire et voter.
+
+Courbes : `results/training_curves.png` (sans vote) et `results/training_curves_vote.png` (avec vote).
 
 ## Structure
 `amongus/rt_world.py` monde temps réel + mémoire + enregistrement des trajectoires · `rt_map.py` carte/navigation/vision ·
