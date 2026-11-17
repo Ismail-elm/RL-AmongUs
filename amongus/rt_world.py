@@ -30,6 +30,7 @@ class RTConfig:
     use_range: float = 120.0
     witness_range: float = 480.0
     vision_range: float = 470.0    # rayon de vision (mémoire des IA, comme l'affichage)
+    together_range: float = 300.0  # deux joueurs vus à moins de cette distance l'un de l'autre sont « ensemble »
     max_time: float = 330.0        # temps limite (s) : sinon victoire de l'imposteur
     wait_sec: float = 2.0
     kill_chase_sec: float = 8.0
@@ -99,6 +100,8 @@ class RTWorld(AmongUsEnv):
         self.mem_y = [[0.0] * n for _ in range(n)]
         self.mem_t = [[NEVER] * n for _ in range(n)]
         self.saw_kill = [set() for _ in range(n)]      # observateur -> tueurs qu'il a vus agir
+        # pair_t[p][q][v] : dernière fois que p a vu q et v ENSEMBLE (« j'ai vu Rouge avec la victime »)
+        self.pair_t = [[[NEVER] * n for _ in range(n)] for _ in range(n)]
         self.cleared_known: set[int] = set()           # innocentés par des témoignages (public)
         self._update_rooms()
         return self
@@ -193,9 +196,16 @@ class RTWorld(AmongUsEnv):
             if not self.alive[p] or p == self.human:
                 continue
             self.mem_x[p][p], self.mem_y[p][p], self.mem_t[p][p] = self.x[p], self.y[p], t
+            seen = [p]
             for q in range(n):
                 if q != p and self.alive[q] and self.sees(p, q):
                     self.mem_x[p][q], self.mem_y[p][q], self.mem_t[p][q] = self.x[q], self.y[q], t
+                    seen.append(q)
+            tr, pt = self.rt.together_range, self.pair_t[p]
+            for i, a in enumerate(seen):
+                for b in seen[i + 1:]:
+                    if math.hypot(self.x[a] - self.x[b], self.y[a] - self.y[b]) < tr:
+                        pt[a][b] = pt[b][a] = t
 
     # -------------------------------------------------------------- utilitaires
     def pos(self, p):

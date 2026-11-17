@@ -5,7 +5,10 @@ Il décide à partir de :
 * ce qui est PUBLIC pendant la réunion — innocentés, accusation par un témoin direct, qui a signalé le corps, et les
   témoignages mis en commun : pour chaque joueur, la dernière fois qu'un crewmate vivant l'a vu, et à quelle distance
   du corps (l'imposteur ne témoigne pas) ;
-* sa MÉMOIRE privée — où et quand il a lui-même vu chaque joueur pour la dernière fois.
+* sa MÉMOIRE privée — où et quand il a lui-même vu chaque joueur pour la dernière fois ;
+* « vu avec la victime » — public et privé : la dernière fois qu'un joueur a été vu à côté de la victime, et s'il est
+  le dernier à avoir été vu avec elle. C'est ce qui permet de se méfier de celui qui signale : l'imposteur peut
+  signaler sa propre victime.
 Le critique (entraînement seulement) voit en plus l'état global, dont l'identité de l'imposteur.
 """
 from __future__ import annotations
@@ -18,7 +21,8 @@ from . import obs as O
 
 N_VOTE = O.N_PLAYERS            # 6 autres joueurs (ordre relatif) + « passer »
 SKIP = N_VOTE - 1
-VOTE_F = 10                     # nb de features par autre joueur
+VOTE_F = 15                     # nb de features par autre joueur
+N_GLOBAL = 18
 AGE_PUB = 60.0                  # s : au-delà, un témoignage ne compte plus
 AGE_MEM = 120.0
 D_NORM = 2500.0
@@ -47,6 +51,29 @@ def public_testimony(world):
     return out
 
 
+def victim_testimony(world, ctx, voter):
+    """Qui a été vu avec la victime ?  -> (pub, priv, frais)
+    pub[q]  : (âge, est le dernier compagnon connu) d'après les crewmates vivants autres que q, ou None ;
+    priv[q] : âge d'après la seule mémoire du votant, ou None ;
+    frais   : âge de la dernière fois qu'une victime a été vue vivante (None si personne ne l'a vue récemment)."""
+    n, t = world.n, world.time
+    crew = world.crew_alive()
+    victims = [v for (_r, v) in ctx.bodies]
+    pub, priv = [None] * n, [None] * n
+    last_alive = max((world.mem_t[c][v] for c in crew for v in victims), default=-1e9)
+    for q in range(n):
+        if q in victims:
+            continue
+        tp = max((world.pair_t[c][q][v] for c in crew if c != q for v in victims), default=-1e9)
+        if t - tp < AGE_PUB:
+            pub[q] = ((t - tp) / AGE_PUB, 1.0 if tp >= last_alive - 2.0 else 0.0)
+        tv = max((world.pair_t[voter][q][v] for v in victims), default=-1e9) if q != voter else -1e9
+        if t - tv < AGE_PUB:
+            priv[q] = (t - tv) / AGE_PUB
+    fresh = (t - last_alive) / AGE_PUB if t - last_alive < AGE_PUB else None
+    return pub, priv, fresh
+
+
 def _known_cleared(world, ctx):
     return set(ctx.cleared) | set(world.cleared_known)
 
@@ -60,12 +87,21 @@ def vote_obs(world, voter, ctx) -> np.ndarray:
     alive = world.alive_players()
     accused = world.imp if ctx.witnesses else -1          # témoignage direct (honnête), comme la règle de base
     mine = pub[voter]
+    cache = getattr(ctx, "vict", None)
+    if cache is None:
+        cache = ctx.vict = {}
+    if voter not in cache:
+        cache[voter] = victim_testimony(world, ctx, voter)
+    vpub, vpriv, fresh = cache[voter]
+    vmine = vpub[voter]
     g = np.array([len(alive) / n, t / world.rt.max_time, world.tasks_fraction(), min(len(ctx.bodies), 3) / 3.0,
                   1.0 if ctx.reporter == voter else 0.0, 1.0 if voter in cleared else 0.0,
                   1.0 if accused >= 0 else 0.0, 1.0 if accused == voter else 0.0,
                   sum(1 for p in alive if p not in cleared) / n,
                   _body_dist(world, world.x[voter], world.y[voter]),
-                  1.0 if mine is not None else 0.0, mine[0] if mine else 1.0, mine[1] if mine else 1.0],
+                  1.0 if mine is not None else 0.0, mine[0] if mine else 1.0, mine[1] if mine else 1.0,
+                  1.0 if fresh is not None else 0.0, fresh if fresh is not None else 1.0,
+                  1.0 if vmine is not None else 0.0, vmine[0] if vmine else 1.0, vmine[1] if vmine else 0.0],
                  dtype=np.float32)
     oth = np.zeros((n - 1, VOTE_F), dtype=np.float32)
     for k in range(1, n):
@@ -85,6 +121,14 @@ def vote_obs(world, voter, ctx) -> np.ndarray:
         else:
             row[7] = row[8] = 1.0
         row[9] = 1.0 if q in world.saw_kill[voter] else 0.0
+        if vpub[q] is not None:                      # vu avec la victime, d'après les autres
+            row[10], row[11], row[12] = 1.0, vpub[q][0], vpub[q][1]
+        else:
+            row[11] = 1.0
+        if vpriv[q] is not None:                     # vu avec la victime, par moi
+            row[13], row[14] = 1.0, vpriv[q]
+        else:
+            row[14] = 1.0
     return np.concatenate([g, oth.ravel()])
 
 
