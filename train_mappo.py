@@ -129,7 +129,10 @@ def main():
         st = torch.load(ck if resuming else args.init, weights_only=False, map_location=dev)
         crew.load(st["crew"]); imp.load(st["imp"])
         if learn_vote and st.get("crew_vote"):
-            crew_v.load(st["crew_vote"]); imp_v.load(st["imp_vote"])
+            if st["crew_vote"]["actor"]["0.weight"].shape[1] == vo:
+                crew_v.load(st["crew_vote"]); imp_v.load(st["imp_vote"])
+            else:
+                print("réseaux de vote d'une ancienne version (autre observation) : ils repartent de zéro", flush=True)
         if resuming:
             snaps_crew, snaps_imp, it0 = st["snaps_crew"], st["snaps_imp"], st["it"]
             print("reprise à l'itération", it0)

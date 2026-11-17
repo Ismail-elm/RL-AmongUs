@@ -38,7 +38,7 @@ python train_mappo.py --iters 1500 --games 128 --out runs/main
 ```bash
 python plot_training.py runs/main        # results/training_curves.png
 python evaluate_mappo.py --n 200         # results/evaluation.md (matrice équipes × imposteurs, IC 95 %)
-python -m unittest discover -s tests     # 33 tests
+python -m unittest discover -s tests     # 35 tests
 ```
 
 ### Ajouter le vote appris à un modèle déjà entraîné
@@ -80,33 +80,47 @@ vote est soit une règle heuristique (`env.py`, défaut), soit appris (voir ci-d
 - *Vote appris* (`amongus/ai/vote.py`, optionnel) : un second réseau par rôle décide, à chaque réunion, de voter contre
   l'un des 6 autres ou de passer. Il voit ce qui est public (innocentés, accusation d'un témoin direct, qui a signalé,
   et pour chaque joueur la dernière fois qu'un crewmate l'a vu et à quelle distance du corps) plus sa propre mémoire.
+  Il sait aussi qui a été « vu avec la victime », et qui l'a été en dernier : c'est ce qui permet de douter de celui
+  qui signale le corps.
   Même PPO, même critique centralisé. Chaque vote est un épisode à lui seul, récompensé par le résultat de la réunion
   (imposteur éjecté / innocent éjecté) et, pour les crewmates, par un signal individuel (+1 vote contre l'imposteur,
   −0,5 contre un innocent) : sans lui, des votes dispersés n'éjectent personne et tous apprennent à passer.
 - Inférence en **numpy pur** (`amongus/ai/policy.py`) : le jeu n'a pas besoin de PyTorch.
 
 ## Résultats du modèle fourni (500 parties/case, % de victoires des crewmates, IC 95 %)
-Le modèle de `models/mappo.npz` : 1500 itérations sans vote appris (192 000 parties), puis 600 itérations avec le vote
-appris, l'imposteur pouvant signaler (76 800 parties).
+Le modèle de `models/mappo.npz` est entraîné en trois étapes : 1500 itérations sans vote appris (192 000 parties),
+600 avec le vote appris et l'imposteur pouvant signaler (76 800 parties), puis 600 de plus après avoir donné au vote
+l'information « vu avec la victime » (76 800 parties).
 
 | Équipe \ Imposteur | Imp MAPPO | Imp scripté | Imp prudent | Imp aléatoire |
 |---|---|---|---|---|
-| Crew MAPPO | 68% ±4 | 98% ±1 | 90% ±3 | 95% ±2 |
-| Crew scripté | 49% ±4 | 86% ±3 | 71% ±4 | 98% ±1 |
-| Crew aléatoire | 10% ±3 | 53% ±4 | 36% ±4 | 42% ±4 |
+| Crew MAPPO | 46% ±4 | 96% ±2 | 88% ±3 | 99% ±1 |
+| Crew scripté | 41% ±4 | 86% ±3 | 71% ±4 | 98% ±1 |
+| Crew aléatoire | 13% ±3 | 53% ±4 | 36% ±4 | 42% ±4 |
 
 Lecture honnête :
-- **Le vote appris est ce qui fait la différence.** Avant lui (itération 1500, vote heuristique), les crewmates MAPPO
-  plafonnaient à 41 % contre l'imposteur MAPPO et faisaient jeu égal avec l'équipe scriptée contre les imposteurs
-  scriptés (87 % / 76 %) : ils n'avaient presque aucune décision à prendre. Voir `results/eval_iter1500/`.
-- **L'imposteur a appris à signaler ses propres victimes.** Sur 600 parties entre les deux IA, il signale lui-même 12 %
-  des corps ; il n'est alors éjecté que dans 39 % des réunions (81 % quand c'est un crewmate qui signale) et un innocent
-  l'est dans 46 %. Les crewmates font encore trop confiance à celui qui signale.
-- **Limites.** L'imposteur s'est spécialisé contre le vote appris : il est moins fort contre l'équipe scriptée (49 % de
-  victoires crewmates) que celui d'avant le vote (35 %). Les témoignages restent honnêtes et produits par le moteur :
-  l'imposteur ne peut pas mentir, seulement se taire et voter.
+- **Le vote appris est ce qui fait la différence pour les crewmates.** Avec le vote heuristique (itération 1500), ils
+  faisaient jeu égal avec l'équipe scriptée contre les imposteurs scriptés (87 % / 76 %) ; avec le vote appris, ils
+  montent à 96 % / 88 %. Voir `results/eval_iter1500/`.
+- **Les deux camps progressent ensemble, d'où les 46 % contre l'imposteur MAPPO.** Ce chiffre a baissé (68 % à
+  l'étape 2) parce que l'imposteur est devenu bien plus fort, pas parce que les crewmates ont régressé. Matchs croisés
+  entre l'étape 2 (« ancien ») et ce modèle (« nouveau »), 800 parties chacun :
 
-Courbes : `results/training_curves.png` (sans vote) et `results/training_curves_vote.png` (avec vote).
+  | Victoires des crewmates | Ancien imposteur | Nouvel imposteur |
+  |---|---|---|
+  | Anciens crewmates | 62 % | 46 % |
+  | Nouveaux crewmates | 72 % | 46 % |
+
+- **Le bluff de l'imposteur marche moins.** L'imposteur signale lui-même ses victimes (15 à 27 % des réunions selon
+  l'adversaire). Dans ces réunions, un innocent était éjecté 49 % du temps avec les anciens crewmates ; c'est 35 % avec
+  les nouveaux, et 26 % face au nouvel imposteur. Mais celui-ci a déplacé son avantage : quand c'est un crewmate qui
+  signale, il n'est plus éjecté que dans 55 % des réunions (79 à 83 % auparavant), et la méfiance a un coût (30 %
+  d'innocents éjectés dans ces réunions).
+- **Limites.** Les témoignages restent honnêtes et produits par le moteur : l'imposteur ne peut pas mentir, seulement
+  choisir où aller, quand tuer, s'il signale, et pour qui voter.
+
+Courbes : `results/training_curves.png` (étape 1), `results/training_curves_vote.png` (étape 2) et
+`results/training_curves_vote2.png` (étape 3).
 
 ## Structure
 `amongus/rt_world.py` monde temps réel + mémoire + enregistrement des trajectoires · `rt_map.py` carte/navigation/vision ·

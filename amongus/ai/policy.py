@@ -82,9 +82,12 @@ def load_actors(path):
 
 def load_vote_actors(path):
     """-> (NumpyActor de vote crew | None, NumpyActor de vote imposteur | None) ; None si le modèle n'en a pas."""
+    from .vote import dims
     z = np.load(path)
     out = []
     for role in ("crewvote", "impvote"):
         n = sum(1 for k in z.files if k.startswith(role + "_W"))
+        if n and z[f"{role}_W0"].shape[0] != dims()[0]:
+            n = 0        # réseau de vote d'une ancienne version (autre observation) : on retombe sur la règle heuristique
         out.append(NumpyActor([(z[f"{role}_W{i}"], z[f"{role}_b{i}"]) for i in range(n)]) if n else None)
     return out[0], out[1]

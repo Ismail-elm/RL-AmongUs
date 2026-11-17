@@ -53,6 +53,44 @@ class TestVote(unittest.TestCase):
         self.assertTrue(np.isfinite(o).all())
         self.assertEqual(m.tolist(), [True, True, True, True, False, True, True])   # joueur 5 mort, « passer » permis
 
+    def test_seen_with_victim(self):
+        """Un crewmate voit Rouge (0) à côté de la future victime (1) : après le meurtre, c'est un témoignage public
+        contre Rouge, même si c'est Rouge qui signale le corps."""
+        from amongus import rt_map as M
+        w = RTWorld(seed=1)
+        w.reset(imposter=0)
+        w.x[0], w.y[0] = w.x[1] + 30, w.y[1]                 # l'imposteur colle la victime
+        for q in range(3, w.n):                              # les autres sont loin ; 2 reste et regarde
+            w.x[q], w.y[q] = M.task_stand(5)
+        w._update_rooms()
+        w.time = 10.0
+        w._observe()
+        self.assertEqual(w.pair_t[2][0][1], 10.0)            # 2 a vu 0 et 1 ensemble
+        self.assertLess(w.pair_t[3][0][1], 0)                # 3 était trop loin pour le voir
+        w.x[2], w.y[2] = M.task_stand(5)                     # le témoin s'en va, puis le meurtre a lieu sans témoin
+        w._update_rooms()
+        w.time = 14.0
+        w.do_kill(0, 1)
+        ctx = MeetingCtx(reporter=0, bodies=list(w.bodies), cleared=set(), witnesses=[], imposter=0)
+        pub, priv, fresh = V.victim_testimony(w, ctx, voter=3)
+        self.assertIsNotNone(pub[0])
+        self.assertEqual(pub[0][1], 1.0)                     # dernier compagnon connu de la victime
+        self.assertIsNone(pub[3])                            # jamais vu avec elle
+        self.assertIsNone(priv[0])                           # 3 ne l'a pas vu lui-même…
+        self.assertIsNotNone(V.victim_testimony(w, ctx, voter=2)[1][0])      # …mais 2, oui
+        o = V.vote_obs(w, 3, ctx)
+        row = o[V.N_GLOBAL:].reshape(w.n - 1, V.VOTE_F)[(0 - 3 - 1) % w.n]  # la case de Rouge vue par 3
+        self.assertEqual((row[3], row[10], row[12]), (1.0, 1.0, 1.0))        # a signalé ET vu en dernier avec la victime
+
+    def test_old_vote_network_is_ignored(self):
+        """Un réseau de vote entraîné avec une autre observation n'est pas chargé (retour à la règle heuristique)."""
+        oc, oi, _, _ = O.dims()
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "m.npz")
+            save_actors(f, random_actor(oc, N_ACTIONS), random_actor(oi, N_ACTIONS),
+                        crew_vote=random_actor(73, V.N_VOTE), imp_vote=random_actor(73, V.N_VOTE))
+            self.assertEqual(load_vote_actors(f), (None, None))
+
     def test_action_maps_to_player(self):
         vo, _ = V.dims()
         w = RTWorld(seed=1)
