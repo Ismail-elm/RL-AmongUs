@@ -75,6 +75,27 @@ def task_stand(r: int):
     return None if t is None else (t[0], t[1] + 56)
 
 
+# Conduits d'aération : trois réseaux en triangle (chaque grille mène aux deux autres du même réseau).
+VENT_LINKS = {
+    11: (7, 10), 10: (7, 11), 7: (10, 11),      # Infirmerie – Sécurité – Électricité
+    1: (2, 4), 2: (1, 4), 4: (1, 2),            # Armes – Navigation – Boucliers
+    9: (3, 6), 3: (6, 9), 6: (3, 9),            # Réacteur – O2 – Admin
+}
+FIX_ROOM = 7                                    # panneau électrique (sabotage des lumières)
+
+
+def vent_pos(r: int):
+    """Grille du conduit de la salle r (dans le coin opposé à la borne de tâche)."""
+    x, y, w, h = ROOM_RECTS[r]
+    sx = scene.SPEC[r]["spot"][0]
+    return x + w * (0.14 if sx > 0.5 else 0.86), y + h * 0.8
+
+
+def fix_pos():
+    x, y, w, h = ROOM_RECTS[FIX_ROOM]
+    return x + 0.16 * w, y + 0.55 * h
+
+
 SPAWN_CENTER = room_center(0)
 
 
@@ -169,12 +190,21 @@ def inside_room(x: float, y: float, r: int, margin: float = 0.0) -> bool:
 
 
 def line_of_sight(x1, y1, x2, y2) -> bool:
-    d = math.hypot(x2 - x1, y2 - y1)
-    n = max(1, int(d // 8))
+    """Échantillonne le segment tous les ~8 px ; faux dès qu'un point tombe hors du sol (mur)."""
+    ddx, ddy = x2 - x1, y2 - y1
+    n = max(1, int(math.hypot(ddx, ddy) // 8))
+    walk = _WALK_B
+    if 0 <= x1 < WORLD_W and 0 <= y1 < WORLD_H and 0 <= x2 < WORLD_W and 0 <= y2 < WORLD_H:
+        # les deux bouts sont dans la carte : tous les points du segment aussi (pas de test de bord)
+        for i in range(1, n + 1):
+            t = i / n
+            if walk[int(y1 + ddy * t) // CELL * GW + int(x1 + ddx * t) // CELL] == 0:
+                return False
+        return True
     for i in range(1, n + 1):
         t = i / n
-        x, y = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
-        if x < 0 or y < 0 or x >= WORLD_W or y >= WORLD_H or _WALK_B[int(y) // CELL * GW + int(x) // CELL] == 0:
+        x, y = x1 + ddx * t, y1 + ddy * t
+        if x < 0 or y < 0 or x >= WORLD_W or y >= WORLD_H or walk[int(y) // CELL * GW + int(x) // CELL] == 0:
             return False
     return True
 
@@ -234,7 +264,13 @@ def _snap(x, y):
 
 def goal_point(goal):
     kind, r = goal
-    return task_stand(r) if kind == "spot" else room_center(r)
+    if kind == "spot":
+        return task_stand(r)
+    if kind == "vent":
+        return vent_pos(r)
+    if kind == "fix":
+        return fix_pos()
+    return room_center(r)
 
 
 def field(goal):
@@ -266,6 +302,42 @@ def field(goal):
                 heapq.heappush(heap, (nd, nx, ny))
     _fields[goal] = dist
     return dist
+
+
+_steer_tabs: dict = {}
+
+
+def _steer_table(goal):
+    """Pour chaque cellule : la cellule visée par `steer` (deux pas gloutons vers l'objectif), calculée une fois
+    pour toute la carte. Même règle que `steer` : voisin de distance strictement plus petite, à égalité le premier
+    dans l'ordre de _DIRS."""
+    tab = _steer_tabs.get(goal)
+    if tab is not None:
+        return tab
+    d = np.asarray(field(goal), dtype=np.float64).reshape(NH, NW)
+    inf = np.full((NH + 2, NW + 2), np.inf)
+    inf[1:-1, 1:-1] = d
+    ys, xs = np.mgrid[0:NH, 0:NW]
+    best_d = d.copy()
+    best_i = (ys * NW + xs).ravel().reshape(NH, NW)
+    for dx, dy, _c in _DIRS:                      # dans l'ordre : à égalité, le premier gagne (comme la boucle)
+        nd = inf[1 + dy:1 + dy + NH, 1 + dx:1 + dx + NW]
+        better = nd < best_d
+        best_d = np.where(better, nd, best_d)
+        best_i = np.where(better, (ys + dy) * NW + (xs + dx), best_i)
+    one = best_i.ravel()
+    tab = one[one].tolist()                       # deux pas
+    _steer_tabs[goal] = tab
+    return tab
+
+
+def steer_goal(goal, x, y):
+    """Comme steer(field(goal), x, y), mais par lecture dans une table précalculée."""
+    cx, cy = int(x) // NAV, int(y) // NAV
+    cx = min(max(cx, 0), NW - 1)
+    cy = min(max(cy, 0), NH - 1)
+    t = _steer_table(goal)[cy * NW + cx]
+    return (t % NW + 0.5) * NAV - x, (t // NW + 0.5) * NAV - y
 
 
 def steer(dist, x, y):

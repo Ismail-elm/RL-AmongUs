@@ -24,6 +24,14 @@ class NumpyActor:
         return h @ w + b
 
 
+def sample(rng, pr):
+    """Même tirage que rng.choice(len(pr), p=pr) (même nombre aléatoire consommé, même résultat), sans ses
+    vérifications coûteuses."""
+    cdf = np.asarray(pr, dtype=np.float64).cumsum()
+    cdf /= cdf[-1]
+    return int(cdf.searchsorted(rng.random(), side="right"))
+
+
 class PolicyCtrl:
     """Contrôleur utilisant un acteur par rôle. `decide` suit l'interface de RTWorld."""
 
@@ -47,7 +55,7 @@ class PolicyCtrl:
         z = z - z.max()
         pr = np.exp(z)
         pr /= pr.sum()
-        a = int(self.rng.choice(N_ACTIONS, p=pr))
+        a = sample(self.rng, pr)
         if not record:
             return a, None
         logp = float(np.log(max(pr[a], 1e-12)))
@@ -57,10 +65,11 @@ class PolicyCtrl:
 
 
 # ------------------------------------------------------------------ fichiers
-def save_actors(path, crew_params, imp_params, meta=None, crew_vote=None, imp_vote=None):
-    """Sauve les acteurs (poids numpy) dans un .npz + meta JSON. Les réseaux de vote sont optionnels."""
+def save_actors(path, crew_params, imp_params, meta=None, crew_vote=None, imp_vote=None, imp_claim=None):
+    """Sauve les acteurs (poids numpy) dans un .npz + meta JSON. Les réseaux de vote et de déclaration sont optionnels."""
     d = {}
-    for role, params in (("crew", crew_params), ("imp", imp_params), ("crewvote", crew_vote), ("impvote", imp_vote)):
+    for role, params in (("crew", crew_params), ("imp", imp_params), ("crewvote", crew_vote), ("impvote", imp_vote),
+                         ("impclaim", imp_claim)):
         for i, (w, b) in enumerate(params or []):
             d[f"{role}_W{i}"] = np.asarray(w, np.float32)
             d[f"{role}_b{i}"] = np.asarray(b, np.float32)
@@ -71,13 +80,28 @@ def save_actors(path, crew_params, imp_params, meta=None, crew_vote=None, imp_vo
 
 
 def load_actors(path):
-    """-> (NumpyActor crew, NumpyActor imposteur)."""
+    """-> (NumpyActor crew, NumpyActor imposteur). Refuse un modèle entraîné avec d'autres observations."""
     z = np.load(path)
+    expected = O.dims()[:2]
     out = []
-    for role in ("crew", "imp"):
+    for role, dim in zip(("crew", "imp"), expected):
         n = sum(1 for k in z.files if k.startswith(role + "_W"))
+        got = z[f"{role}_W0"].shape[0]
+        if got != dim:
+            raise ValueError(f"{path} : modèle d'une autre version du jeu (observation {role} de taille {got}, "
+                             f"{dim} attendue). Réentraînez avec train_mappo.py ou prenez un modèle de cette version.")
         out.append(NumpyActor([(z[f"{role}_W{i}"], z[f"{role}_b{i}"]) for i in range(n)]))
     return out[0], out[1]
+
+
+def load_claim_actor(path):
+    """-> NumpyActor de déclaration de l'imposteur, ou None (modèle sans, ou d'une autre version)."""
+    from .claim import dims
+    z = np.load(path)
+    n = sum(1 for k in z.files if k.startswith("impclaim_W"))
+    if not n or z["impclaim_W0"].shape[0] != dims()[0]:
+        return None
+    return NumpyActor([(z[f"impclaim_W{i}"], z[f"impclaim_b{i}"]) for i in range(n)])
 
 
 def load_vote_actors(path):

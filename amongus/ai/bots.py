@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import random
 
-from ..env import KILL, N_ROOMS, NONE_HINT, TASK, WAIT
+from ..env import FIX, KILL, N_ROOMS, NONE_HINT, TASK, WAIT
+from ..mapdata import NEXT_HOP
 
 
 class ScriptedCrew:
@@ -11,6 +12,12 @@ class ScriptedCrew:
     name = "crew scripté"
 
     def decide(self, world, p, legal, record=False):
+        if FIX in legal:
+            return FIX, None
+        if getattr(world, "lights_off", False) and world.room[p] >= 0:      # lumières coupées : aller réparer
+            h = NEXT_HOP[world.room[p]][7]
+            if h in legal:
+                return h, None
         if TASK in legal:
             return TASK, None
         h = world.crew_hint(p)

@@ -12,7 +12,7 @@ from amongus.mapdata import ADJ, DIST, NEXT_HOP
 
 
 def make_env(**kw):
-    cfg = Config(**kw)
+    cfg = Config(**{'n_crew': 6, **kw})
     env = AmongUsEnv(cfg, seed=1)
     env.reset(imposter=6)
     return env
@@ -121,7 +121,7 @@ class TestRules(unittest.TestCase):
     def test_deterministic_with_seed(self):
         def play(seed):
             import random
-            env = AmongUsEnv(Config(), seed=seed)
+            env = AmongUsEnv(Config(n_crew=6), seed=seed)
             rng = random.Random(seed + 1)
             while env.winner is None:
                 env.step({q: rng.choice(env.legal_actions(q)) for q in env.alive_players()})

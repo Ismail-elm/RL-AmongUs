@@ -16,21 +16,32 @@ from dataclasses import dataclass
 
 from . import rt_map as M
 from .config import Config
-from .env import AmongUsEnv, Kill, KILL, N_ROOMS, REPORT, TASK, WAIT
+from .env import EMERGENCY, FIX, SABOTAGE, VENT_A, VENT_B, AmongUsEnv, Kill, KILL, N_ROOMS, REPORT, TASK, WAIT
+from .mapdata import ADJ
 
 
 @dataclass
 class RTConfig:
     step_sec: float = 3.5          # durée d'un « pas » de référence (cooldown, escompte)
     speed: float = 240.0           # px/s
-    task_time: float = 8.0         # s de travail sur une borne
+    task_time: float = 5.0         # s de travail sur une borne (8 avant)
     kill_cooldown_s: float = 9.0
     kill_range: float = 120
     report_range: float = 330.0
     use_range: float = 120.0
     witness_range: float = 480.0
-    vision_range: float = 470.0    # rayon de vision (mémoire des IA, comme l'affichage)
+    vision_range: float = 470.0    # rayon de vision de l'imposteur (mémoire des IA, comme l'affichage)
+    crew_vision_range: float = 470.0   # rayon de vision des crewmates (vrai jeu : plus petit que celui de l'imposteur)
     together_range: float = 300.0  # deux joueurs vus à moins de cette distance l'un de l'autre sont « ensemble »
+    emergencies: int = 1           # réunions d'urgence par joueur et par partie (bouton de la Cafétéria)
+    emergency_total: int = 99      # réunions d'urgence au total dans la partie (tous joueurs confondus)
+    emergency_cooldown: float = 15.0   # s depuis le début de la partie / la dernière réunion avant de pouvoir l'appeler
+    meeting_time: float = 20.0     # s de chrono consommées par chaque réunion (discussion et vote, comme dans le vrai jeu)
+    lights_vision: float = 160.0   # vision des crewmates quand les lumières sont coupées
+    sabotage_cooldown: float = 30.0    # s entre deux sabotages (et au début de la partie / après une réunion)
+    lights_max: float = 45.0       # les lumières se rallument seules au bout de ce temps
+    fix_time: float = 3.0          # s de réparation au panneau d'Électricité
+    vent_time: float = 1.0         # s passées dans le conduit (invisible)
     max_time: float = 330.0        # temps limite (s) : sinon victoire de l'imposteur
     wait_sec: float = 2.0
     kill_chase_sec: float = 8.0
@@ -44,7 +55,7 @@ class RewardConfig:
     """Récompenses d'entraînement (n'affectent pas les règles du jeu)."""
     time: float = -0.003           # par seconde, tous les joueurs vivants
     work: float = 0.05             # par seconde de tâche (crewmate qui travaille)
-    task_team: float = 1.0         # une tâche finie : récompense partagée par tous les crewmates vivants
+    task_team: float = 2.0         # une tâche finie : récompense partagée par tous les crewmates vivants (1 avant)
     crew_death: float = -1.5       # la victime (tuée ou éjectée à tort)
     crew_death_team: float = -0.3  # les autres crewmates vivants quand un des leurs meurt
     kill: float = 1.5              # imposteur : un kill
@@ -54,6 +65,8 @@ class RewardConfig:
     vote_wrong: float = -0.5       # crewmate : a voté contre un innocent (rentable seulement si P(imposteur) > 1/3)
     vote_eject_imp: float = 5.0    # résultat de la réunion, pour chaque votant : imposteur éjecté (signe inversé pour lui)
     vote_eject_crew: float = -2.0  # résultat de la réunion : un innocent éjecté (signe inversé pour l'imposteur)
+    imp_ejected: float = -5.0      # imposteur éjecté (sa trajectoire s'arrête ; son partenaire peut encore gagner)
+    fix: float = 0.5               # crewmate : a réparé les lumières
     win: float = 10.0
     loss: float = -10.0
 
@@ -65,15 +78,20 @@ class RTWorld(AmongUsEnv):
         self.rw = rw or RewardConfig()
         self.crew_ctrl = None
         self.imp_ctrl = None
-        self.crew_vote = None          # contrôleurs de vote appris (None -> règle heuristique de env.py)
+        self.crew_vote = None          # contrôleurs de vote appris (None -> règle heuristique)
         self.imp_vote = None
+        self.imp_claim = None          # déclaration appris de l'imposteur (None -> règle heuristique)
+        self.claim_callbacks: dict[int, callable] = {}   # imposteur humain : f(monde, joueur, ctx) -> (salle, accusé)
         self.record_crew = self.record_imp = False
         self.human: int | None = None
         self.human_input = dict(dx=0.0, dy=0.0, use=False)
         super().__init__(cfg, seed)
 
+    def _n_imp(self):
+        return self.cfg.n_imp
+
     # ------------------------------------------------------------------ reset
-    def reset(self, imposter: int | None = None):
+    def reset(self, imposter=None):
         super().reset(imposter)
         n, rt = self.n, self.rt
         pts = M.spawn_points(n)
@@ -88,9 +106,23 @@ class RTWorld(AmongUsEnv):
         self.traj: dict[int, list] = {p: [] for p in range(n)}
         self.vtraj: dict[int, list] = {p: [] for p in range(n)}     # décisions de VOTE enregistrées (une par réunion)
         self._vote_recs: dict[int, dict] = {}                        # votes de la réunion en cours
+        self.ctraj: dict[int, list] = {p: [] for p in range(n)}     # déclarations enregistrées des imposteurs
+        self._claim_recs: dict[int, dict] = {}
+        self.known_dead: set[int] = set()              # morts connues de tous (révélées par une réunion)
+        self.seen_dead = [set() for _ in range(n)]     # morts qu'un joueur a vues lui-même (corps, meurtre)
+        self.emergencies_left = [rt.emergencies] * n
+        self.emergency_total_left = rt.emergency_total
+        self.last_meeting_t = 0.0
+        self._emergency_now = False
+        self.lights_off = False
+        self.lights_t = 0.0                            # début du sabotage en cours
+        self.sab_ready_t = rt.sabotage_cooldown        # instant où l'imposteur pourra saboter
+        self.fix_prog = 0.0
+        self.vent_seen: dict[int, list] = {}           # imposteur -> crewmates qui l'ont vu entrer/sortir d'un conduit
+        self.in_vent: set[int] = set()                 # imposteurs en train de traverser un conduit (invisibles)
+        self.vent_idx = 0                              # humain : prochaine sortie du conduit
         self.time = 0.0
-        self.cd_s = rt.kill_cooldown_s
-        self.cooldown = math.ceil(self.cd_s / rt.step_sec - 1e-9)
+        self.kcd = [rt.kill_cooldown_s] * n            # recharge du meurtre, par imposteur
         self._sample_t = 0.0
         self._observe_t = 0.0
         self.room = [0] * n
@@ -107,16 +139,24 @@ class RTWorld(AmongUsEnv):
         return self
 
     def set_controllers(self, crew, imp, record_crew: bool = False, record_imp: bool = False,
-                        crew_vote=None, imp_vote=None):
+                        crew_vote=None, imp_vote=None, imp_claim=None):
         """crew / imp : objets avec decide(world, p, legal, record) -> (action, enregistrement|None).
-        crew_vote / imp_vote : objets avec vote(world, votant, ctx, record) -> (cible|None, enregistrement|None)."""
+        crew_vote / imp_vote : objets avec vote(world, votant, ctx, record) -> (cible|None, enregistrement|None).
+        imp_claim : objet avec claim(world, imposteur, ctx, record) -> (salle, accusé|None, enregistrement|None)."""
         self.crew_ctrl, self.imp_ctrl = crew, imp
         self.crew_vote, self.imp_vote = crew_vote, imp_vote
+        self.imp_claim = imp_claim
         self.record_crew, self.record_imp = record_crew, record_imp
 
     # ------------------------------------------------------- enregistrement (apprentissage)
     def _recording(self, p):
-        return self.record_imp if p == self.imp else self.record_crew
+        return self.record_imp if p in self.imps else self.record_crew
+
+    @property
+    def cd_s(self):
+        """Recharge du meurtre de l'imposteur suivi (humain s'il est imposteur, sinon le premier)."""
+        p = self.human if (self.human is not None and self.human in self.imps) else self.imp
+        return self.kcd[p]
 
     def _credit(self, p, r):
         pend = self.ag[p].get("pend")
@@ -125,16 +165,16 @@ class RTWorld(AmongUsEnv):
 
     def ai_vote(self, voter, ctx):
         """Vote d'un joueur IA : réseau de vote s'il y en a un pour son rôle, sinon règle heuristique."""
-        ctrl = self.imp_vote if voter == self.imp else self.crew_vote
+        ctrl = self.imp_vote if voter in self.imps else self.crew_vote
         if ctrl is None:
-            return super().ai_vote(voter, ctx)
+            return self.heuristic_vote(voter, ctx)
         rec_flag = self._recording(voter)
         choice, rec = ctrl.vote(self, voter, ctx, rec_flag)
         if rec is not None:
             # signal individuel : sans lui, des votes non coordonnés n'éjectent personne et tout le monde apprend à passer
             rec["r"] = 0.0
-            if voter != self.imp and choice is not None:
-                rec["r"] = self.rw.vote_right if choice == self.imp else self.rw.vote_wrong
+            if voter not in self.imps and choice is not None:
+                rec["r"] = self.rw.vote_right if choice in self.imps else self.rw.vote_wrong
             self._vote_recs[voter] = rec
         return choice
 
@@ -142,12 +182,144 @@ class RTWorld(AmongUsEnv):
         """Fin de réunion : chaque vote enregistré reçoit le résultat de la réunion et forme un épisode à lui seul.
         (La suite de la partie dépend surtout des déplacements : la créditer au vote noierait le signal.)"""
         rw = self.rw
+        out = 0.0 if ejected is None else (rw.vote_eject_imp if ejected in self.imps else rw.vote_eject_crew)
         for voter, rec in self._vote_recs.items():
-            out = 0.0 if ejected is None else (rw.vote_eject_imp if ejected == self.imp else rw.vote_eject_crew)
-            rec["r"] += -out if voter == self.imp else out
+            rec["r"] += -out if voter in self.imps else out
             rec["dur"], rec["done"] = 1.0, True
             self.vtraj[voter].append(rec)
         self._vote_recs = {}
+        for imp, rec in self._claim_recs.items():      # déclarations des imposteurs : même résultat que leur vote
+            rec["r"] -= out
+            rec["dur"], rec["done"] = 1.0, True
+            self.ctraj[imp].append(rec)
+        self._claim_recs = {}
+
+    # ------------------------------------------------------------- réunion : discussion
+    def zone(self, p):
+        """Salle où se trouve p (dans un couloir : la salle la plus proche)."""
+        r = self.room[p]
+        return r if r >= 0 else M.nearest_room(self.x[p], self.y[p])
+
+    def _evidence(self):
+        """Témoins directs encore en vie. (Les innocentés viennent des déclarations : voir _prepare_meeting.)"""
+        wit = []
+        for w in self.witness_of():
+            if w not in wit:
+                wit.append(w)
+        return set(), wit
+
+    def witness_of(self):
+        """Témoins directs vivants -> imposteur qu'ils ont vu tuer (ou utiliser un conduit)."""
+        out = {}
+        for k in self.kills:
+            for w in k.witnesses:
+                if self.alive[w] and w not in self.imps:
+                    out[w] = k.killer
+        for imp, ws in self.vent_seen.items():
+            for w in ws:
+                if self.alive[w] and w not in out:
+                    out[w] = imp
+        return out
+
+    def _prepare_meeting(self, ctx):
+        """Discussion avant le vote, à propos du dernier meurtre depuis la réunion précédente.
+        1) Chaque crewmate dit honnêtement où il était ; un témoin direct accuse le tueur.
+        2) Chaque imposteur, après les avoir entendus, dit où il était (vrai ou faux) et peut accuser quelqu'un.
+        3) Recoupement par les crewmates : « je l'ai vu là » (confirme), « je l'ai vu ailleurs » (contredit),
+           « j'étais dans cette salle et il n'y était pas » (absent). Innocenté = confirmé, hors de la salle du crime."""
+        ctx.emergency = self._emergency_now
+        self.known_dead |= {p for p in range(self.n) if not self.alive[p]}     # la réunion révèle les morts
+        # mémoire imparfaite : chaque crewmate ne se souvient (et ne parle) que d'une partie des joueurs qu'il a vus
+        rc = self.cfg.recall
+        ctx.shared = {c: {q for q in range(self.n) if q != c and self.rng.random() < rc} for c in self.crew_alive()}
+        ref = self.kills[-1] if self.kills else None
+        if ref is None:
+            ctx.cleared = set()
+            return
+        ctx.kill_room, ctx.ref = ref.room, ref
+        crew = [c for c in self.crew_alive()]
+        wit = self.witness_of()
+        for c in crew:
+            ctx.claims[c] = ref.zone.get(c, self.zone(c))
+            if c in wit:
+                ctx.accuse[c] = wit[c]
+        for imp in self.imps_alive():
+            room, acc = self.ai_claim(ctx, imp)
+            ctx.claims[imp] = int(room)
+            if acc is not None and acc not in self.imps and self.alive[acc]:
+                ctx.accuse[imp] = acc
+        cleared = set()
+        for q, cr in ctx.claims.items():
+            conf, contra, absent = [], [], []
+            for c in crew:
+                if c == q or q not in ctx.shared[c]:
+                    continue
+                if q in ref.sight.get(c, ()):
+                    (conf if ref.zone.get(q) == cr else contra).append(c)
+                elif ref.rooms.get(c, -1) == cr:
+                    absent.append(c)
+            ctx.confirm[q], ctx.contra[q], ctx.absent[q] = conf, contra, absent
+            if conf and not contra and not absent and cr != ref.room:
+                cleared.add(q)
+        ctx.cleared = cleared
+
+    def ai_claim(self, ctx, imp=None):
+        """Déclaration d'un imposteur -> (salle, accusé | None)."""
+        imp = self.imp if imp is None else imp
+        cb = self.claim_callbacks.get(imp)
+        if cb is not None:
+            return cb(self, imp, ctx)
+        if self.imp_claim is None:
+            return self.heuristic_claim(ctx, imp)
+        room, acc, rec = self.imp_claim.claim(self, imp, ctx, self._recording(imp))
+        if rec is not None:
+            rec["r"] = 0.0
+            self._claim_recs[imp] = rec
+        return room, acc
+
+    def heuristic_claim(self, ctx, imp=None):
+        """Règle simple : se dire dans une salle où aucun crewmate ne dit avoir été, loin du crime ; n'accuse personne."""
+        taken = set(ctx.claims.values())
+        rooms = [r for r in range(N_ROOMS) if r != ctx.kill_room and r not in taken] or \
+            [r for r in range(N_ROOMS) if r != ctx.kill_room]
+        return self.rng.choice(rooms), None
+
+    def heuristic_vote(self, voter, ctx):
+        """Vote par règles (bots, et sans réseau de vote)."""
+        alive = self.alive_players()
+        others = [p for p in alive if p != voter]
+        if voter in self.imps:
+            cands = [p for p in others if p not in ctx.cleared and p not in self.imps]
+            return self.rng.choice(cands) if cands else None
+        wit = self.witness_of()
+        if voter in wit:
+            return wit[voter]
+        liars = [q for q in others if ctx.contra.get(q) or ctx.absent.get(q)]
+        if liars:
+            return self.rng.choice(liars)
+        counts = {}
+        for a, t in ctx.accuse.items():
+            if a != voter and t in others:
+                counts[t] = counts.get(t, 0) + 1
+        if counts:
+            top = max(counts, key=counts.get)
+            if top not in ctx.cleared:
+                return top
+        cleared = set(ctx.cleared) | self.cleared_known
+        suspects = [p for p in others if p not in cleared]
+        if not suspects or len(suspects) > self.cfg.skip_threshold:
+            return None
+        return self.rng.choice(suspects)
+
+    def believes_alive(self, p, q):
+        """Ce que p sait : l'imposteur sait qui il a tué ; un crewmate apprend une mort à la réunion ou en la voyant."""
+        if p in self.imps or p == q:
+            return self.alive[q]
+        return q not in self.known_dead and q not in self.seen_dead[p]
+
+    def can_emergency(self, p):
+        return (self.alive[p] and self.room[p] == 0 and self.emergencies_left[p] > 0 and self.emergency_total_left > 0
+                and self.time - self.last_meeting_t >= self.rt.emergency_cooldown)
 
     def _credit_crew(self, r, exclude=None):
         if not self.record_crew:
@@ -170,8 +342,8 @@ class RTWorld(AmongUsEnv):
         for p in range(self.n):
             if not self._recording(p):
                 continue
-            if self.alive[p] or p == self.imp:
-                good = (winner == "imp") == (p == self.imp)
+            if self.alive[p] or p in self.imps:
+                good = (winner == "imp") == (p in self.imps)
                 self._credit(p, rw.win if good else rw.loss)
             self._close_pending(p, True)
 
@@ -184,11 +356,19 @@ class RTWorld(AmongUsEnv):
         """p voit-il q (même salle, ou à portée de vision et en ligne de mire) ?"""
         if p == q:
             return True
+        if q in self.in_vent:
+            return False
+        dark = self.lights_off and p not in self.imps
         rp, rq = self.room[p], self.room[q]
-        if rp >= 0 and rp == rq:
+        if rp >= 0 and rp == rq and not dark:
             return True
         d = math.hypot(self.x[p] - self.x[q], self.y[p] - self.y[q])
-        return d < self.rt.vision_range and M.line_of_sight(self.x[p], self.y[p], self.x[q], self.y[q])
+        return d < self.vision(p) and M.line_of_sight(self.x[p], self.y[p], self.x[q], self.y[q])
+
+    def vision(self, p):
+        if p in self.imps:
+            return self.rt.vision_range
+        return self.rt.lights_vision if self.lights_off else self.rt.crew_vision_range
 
     def _observe(self):
         n, t = self.n, self.time
@@ -206,6 +386,12 @@ class RTWorld(AmongUsEnv):
                 for b in seen[i + 1:]:
                     if math.hypot(self.x[a] - self.x[b], self.y[a] - self.y[b]) < tr:
                         pt[a][b] = pt[b][a] = t
+            if p not in self.imps:             # corps aperçus : ce crewmate sait que la victime est morte
+                for (_r, v) in self.bodies:
+                    bp = self.body_pos.get(v)
+                    if bp is not None and math.hypot(bp[0] - self.x[p], bp[1] - self.y[p]) < self.vision(p) \
+                            and M.line_of_sight(self.x[p], self.y[p], bp[0], bp[1]):
+                        self.seen_dead[p].add(v)
 
     # -------------------------------------------------------------- utilitaires
     def pos(self, p):
@@ -225,10 +411,10 @@ class RTWorld(AmongUsEnv):
             self.room[p] = r
             if r >= 0:
                 self.ag[p]["last_room"] = r
-        if self.alive[self.imp]:
-            r = self.room[self.imp]
+        for imp in self.imps_alive():                 # mémoire partagée des imposteurs (bots scriptés)
+            r = self.room[imp]
             if r >= 0:
-                if any(q != self.imp and self.alive[q] and self.room[q] == r for q in range(self.n)):
+                if any(q not in self.imps and self.alive[q] and self.room[q] == r for q in range(self.n)):
                     self.imp_mem = r
                 elif self.imp_mem == r:
                     self.imp_mem = None
@@ -249,7 +435,7 @@ class RTWorld(AmongUsEnv):
         self.moving[p] = True
 
     def _steer(self, p, goal, dt):
-        dx, dy = M.steer(M.field(goal), self.x[p], self.y[p])
+        dx, dy = M.steer_goal(goal, self.x[p], self.y[p])
         d = math.hypot(dx, dy)
         if d > 1e-6:
             s = self.rt.speed * dt / d
@@ -264,10 +450,10 @@ class RTWorld(AmongUsEnv):
 
     # ------------------------------------------------------------ règles de fin
     def _outcome(self):
-        if not self.alive[self.imp]:
+        if not self.imps_alive():
             return "crew", "ejected"
         ac = self.crew_alive()
-        if len(ac) <= self.cfg.crew_left_to_lose:
+        if self._parity(ac):
             return "imp", "parity"
         if all(not self.tasks[p] for p in ac):
             return "crew", "tasks"
@@ -276,35 +462,35 @@ class RTWorld(AmongUsEnv):
         return None
 
     def tasks_fraction(self):
-        """Barre de tâches globale (comme dans le vrai jeu)."""
-        total = self.cfg.tasks_per_crew * len(self.crew_alive())
-        left = sum(len(self.tasks[p]) for p in self.crew_alive())
-        return 1.0 - left / total if total else 1.0
+        """Barre de tâches globale : tâches faites / tâches de départ (elle ne bouge pas quand quelqu'un meurt, sinon
+        elle trahirait les meurtres)."""
+        total = self.cfg.tasks_per_crew * self.cfg.n_crew
+        return min(1.0, self.stats["tasks_done"] / total) if total else 1.0
 
     # ------------------------------------------------------------------ actions
     def do_kill(self, killer: int, victim: int):
         cfg, rt, rw = self.cfg, self.rt, self.rw
         kr = self.room[killer] if self.room[killer] >= 0 else M.nearest_room(self.x[killer], self.y[killer])
-        witnesses = []
-        for q in self.crew_alive():
-            if q == victim:
-                continue
-            same = self.room[q] == self.room[killer] and self.room[q] >= 0
-            seen = self.dist(q, killer) < rt.witness_range and M.line_of_sight(
-                self.x[q], self.y[q], self.x[killer], self.y[killer])
-            if same or seen:
-                witnesses.append(q)
+        witnesses = [q for q in self.crew_alive() if q != victim and self.sees(q, killer)]
         for w in witnesses:
             self.saw_kill[w].add(killer)
+            self.seen_dead[w].add(victim)
+        # instantané pour les déclarations en réunion : où était chacun, et qui voyait qui
+        snap = dict(t=self.time, zone={}, rooms={}, sight={}, dark=self.lights_off, killer=killer)
+        for p in self.alive_players():
+            if p == victim:
+                continue
+            snap["zone"][p] = kr if p == killer else self.zone(p)
+            snap["rooms"][p] = self.room[p]
+            snap["sight"][p] = {q for q in self.alive_players() if q != p and q != victim and self.sees(p, q)}
         self.alive[victim] = False
         self.working[victim] = False
         self.body_pos[victim] = (self.x[victim], self.y[victim])
-        self.cd_s = rt.kill_cooldown_s
-        self.cooldown = math.ceil(self.cd_s / rt.step_sec - 1e-9)
+        self.kcd[killer] = rt.kill_cooldown_s
         self.room[victim] = -1
         # le journal de positions contient le moment du meurtre (victime = -1)
         self.log.append(tuple(self.code(p) for p in range(self.n)))
-        self.kills.append(Kill(idx=len(self.log) - 1, room=kr, victim=victim, witnesses=witnesses))
+        self.kills.append(Kill(idx=len(self.log) - 1, room=kr, victim=victim, witnesses=witnesses, **snap))
         self.bodies.append((kr, victim))
         self.stats["kills"] += 1
         if witnesses:
@@ -322,21 +508,39 @@ class RTWorld(AmongUsEnv):
         if out is not None:
             self._finish(out[0], out[1], [0.0] * self.n, [False] * self.n)
 
-    def start_meeting(self, reporter: int):
+    def start_meeting(self, reporter: int, emergency: bool = False):
         rw = self.rw
         rew, term = [0.0] * self.n, [False] * self.n
-        self._meeting(reporter, rew, term)    # preuves, votes, éjection (env.py)
-        ev = self.events[-1]
+        self._emergency_now = emergency
+        if emergency:
+            self.emergencies_left[reporter] -= 1
+            self.emergency_total_left -= 1
+            self.stats["emergencies"] = self.stats.get("emergencies", 0) + 1
+        n_ev = len(self.events)
+        self._meeting(reporter, rew, term)    # discussion, votes, éjection (env.py + _prepare_meeting)
+        ev = [e for e in self.events[n_ev:] if e["type"] == "meeting"][-1]
+        self._emergency_now = False
+        self.time += self.rt.meeting_time      # la réunion prend du temps : enchaîner les réunions rapproche du temps limite
+        self.t = int(self.time)
+        self.last_meeting_t = self.time
+        self.known_dead |= {p for p in range(self.n) if not self.alive[p]}
         self._close_votes(ev["ejected"])
         self.cleared_known |= {c for c in ev["cleared"] if self.alive[c]}
         for p in range(self.n):                # les éjectés : fin de trajectoire
-            if term[p] and not self.alive[p] and p != self.imp:
-                if self.record_crew:
-                    self._credit(p, rw.crew_death)
-                    self._close_pending(p, True)
-                    self._credit_crew(rw.crew_death_team)
+            if not (term[p] and not self.alive[p]):
+                continue
+            if p in self.imps:
                 if self.record_imp:
-                    self._credit(self.imp, rw.wrong_eject)
+                    self._credit(p, rw.imp_ejected)
+                    self._close_pending(p, True)
+                continue
+            if self.record_crew:
+                self._credit(p, rw.crew_death)
+                self._close_pending(p, True)
+                self._credit_crew(rw.crew_death_team)
+            if self.record_imp:
+                for imp in self.imps_alive():
+                    self._credit(imp, rw.wrong_eject)
         pts = M.spawn_points(self.n)
         for p in range(self.n):
             self.x[p], self.y[p] = pts[p]
@@ -344,8 +548,12 @@ class RTWorld(AmongUsEnv):
             self.working[p] = False
             self.ag[p]["macro"] = None
         self.body_pos.clear()
-        self.cd_s = self.rt.kill_cooldown_s
-        self.cooldown = math.ceil(self.cd_s / self.rt.step_sec - 1e-9)
+        self.vent_seen = {}
+        self.in_vent = set()
+        self.lights_off = False
+        self.fix_prog = 0.0
+        self.sab_ready_t = self.time + self.rt.sabotage_cooldown
+        self.kcd = [self.rt.kill_cooldown_s] * self.n
         self._sample_t = 0.0
         self._update_rooms()
         out = self._outcome()
@@ -372,10 +580,106 @@ class RTWorld(AmongUsEnv):
         return v is not None and d <= self.rt.report_range
 
     def legal_actions(self, p):
-        acts = super().legal_actions(p)
-        if p == self.imp and self.can_report(p):
-            acts.append(REPORT)        # les crewmates IA signalent automatiquement ; l'imposteur, lui, choisit
+        r = self.room[p]
+        acts = list(ADJ[r]) + [WAIT] if r >= 0 else [WAIT]
+        imp = p in self.imps
+        if imp:
+            if self.kcd[p] <= 0 and any(self.room[q] == r for q in self.crew_alive()):
+                acts.append(KILL)      # on ne tue que des crewmates (pas son partenaire)
+            if self.can_report(p):
+                acts.append(REPORT)    # les crewmates IA signalent automatiquement ; les imposteurs, eux, choisissent
+        elif r in self.tasks[p]:
+            acts.append(TASK)
+        if self.can_emergency(p):
+            acts.append(EMERGENCY)
+        if imp:
+            links = M.VENT_LINKS.get(self.room[p])
+            if links:
+                acts += [VENT_A, VENT_B]
+            if self.can_sabotage():
+                acts.append(SABOTAGE)
+        elif self.lights_off and self.room[p] == M.FIX_ROOM:
+            acts.append(FIX)
         return acts
+
+    # ------------------------------------------------------------- conduits et sabotage
+    def can_sabotage(self):
+        return bool(self.imps_alive()) and not self.lights_off and self.time >= self.sab_ready_t
+
+    def sabotage(self):
+        if not self.can_sabotage():
+            return False
+        self.lights_off, self.lights_t, self.fix_prog = True, self.time, 0.0
+        self.events.append(dict(type="lights", on=False))
+        return True
+
+    def _restore_lights(self, fixer=None):
+        self.lights_off = False
+        self.fix_prog = 0.0
+        self.sab_ready_t = self.time + self.rt.sabotage_cooldown
+        self.events.append(dict(type="lights", on=True, fixer=fixer))
+        if fixer is not None and self.record_crew:
+            self._credit(fixer, self.rw.fix)
+
+    def _fix(self, p, dt):
+        """p travaille au panneau d'Électricité. -> True quand les lumières sont réparées."""
+        self.fix_prog += dt
+        if self.fix_prog >= self.rt.fix_time:
+            self._restore_lights(p)
+            return True
+        return False
+
+    def near_fix(self, p):
+        fx, fy = M.fix_pos()
+        return self.lights_off and self.room[p] == M.FIX_ROOM and math.hypot(fx - self.x[p], fy - self.y[p]) <= self.rt.use_range
+
+    def _vent_witnesses(self, imp):
+        """Crewmates qui voient cet imposteur à cet instant (entrée ou sortie d'un conduit)."""
+        seen = [q for q in self.crew_alive() if self.sees(q, imp)]
+        lst = self.vent_seen.setdefault(imp, [])
+        for q in seen:
+            self.saw_kill[q].add(imp)
+            if q not in lst:
+                lst.append(q)
+        return seen
+
+    def vent(self, p, target):
+        """L'imposteur entre dans la grille de sa salle et ressort par celle de `target`."""
+        seen_in = self._vent_witnesses(p)
+        src = self.room[p]
+        self.x[p], self.y[p] = M.vent_pos(target)
+        self.in_vent.add(p)
+        self._update_rooms()
+        self.events.append(dict(type="vent", player=p, src=src, dst=target, seen=list(seen_in)))
+
+    def _vent_exit(self, p):
+        self.in_vent.discard(p)
+        seen = self._vent_witnesses(p)
+        if seen:
+            self.events.append(dict(type="vent_seen", player=p, seen=list(seen)))
+
+    def human_can_vent(self):
+        h = self.human
+        if h is None or h not in self.imps or not self.alive[h] or h in self.in_vent:
+            return False
+        r = self.room[h]
+        if r not in M.VENT_LINKS:
+            return False
+        vx, vy = M.vent_pos(r)
+        return math.hypot(vx - self.x[h], vy - self.y[h]) <= self.rt.use_range
+
+    def human_vent(self):
+        if self.winner is None and self.human_can_vent():
+            links = M.VENT_LINKS[self.room[self.human]]
+            self.vent(self.human, links[self.vent_idx % len(links)])
+            self.vent_idx += 1
+            self._vent_exit(self.human)
+            return True
+        return False
+
+    def human_sabotage(self):
+        h = self.human
+        return h is not None and h in self.imps and self.winner is None and self.sabotage()
 
     def human_can_report(self):
         h = self.human
@@ -384,6 +688,15 @@ class RTWorld(AmongUsEnv):
     def human_report(self):
         if self.winner is None and self.human_can_report():
             self.start_meeting(self.human)
+            return True
+        return False
+
+    def human_can_emergency(self):
+        return self.human is not None and self.can_emergency(self.human)
+
+    def human_emergency(self):
+        if self.winner is None and self.human_can_emergency():
+            self.start_meeting(self.human, emergency=True)
             return True
         return False
 
@@ -397,7 +710,7 @@ class RTWorld(AmongUsEnv):
 
     def human_can_kill(self):
         h = self.human
-        if h is None or h != self.imp or not self.alive[h] or self.cd_s > 0:
+        if h is None or h not in self.imps or not self.alive[h] or self.kcd[h] > 0:
             return False
         t, d = self.kill_target_for(h)
         return t is not None and d <= self.rt.kill_range
@@ -424,8 +737,10 @@ class RTWorld(AmongUsEnv):
         rt = self.rt
         self.time += dt
         self.t = int(self.time)
-        self.cd_s = max(0.0, self.cd_s - dt)
-        self.cooldown = math.ceil(self.cd_s / rt.step_sec - 1e-9)
+        for imp in self.imps:
+            self.kcd[imp] = max(0.0, self.kcd[imp] - dt)
+        if self.lights_off and self.time - self.lights_t >= rt.lights_max:
+            self._restore_lights()
         for p in range(self.n):
             self.moving[p] = False
         if self.record_crew or self.record_imp:
@@ -474,7 +789,11 @@ class RTWorld(AmongUsEnv):
         if n > 0:
             self._move(p, dx / n * sp * dt, dy / n * sp * dt)
         self.working[p] = False
-        if self.alive[p] and p != self.imp and inp["use"]:
+        if self.alive[p] and p not in self.imps and inp["use"]:
+            if self.near_fix(p):
+                self.working[p] = True
+                self._fix(p, dt)
+                return
             r = self.my_task_nearby(p)
             if r is not None:
                 self.working[p] = True
@@ -501,7 +820,7 @@ class RTWorld(AmongUsEnv):
     def _decide(self, p):
         rt = self.rt
         legal = self.legal_actions(p)
-        ctrl = self.imp_ctrl if p == self.imp else self.crew_ctrl
+        ctrl = self.imp_ctrl if p in self.imps else self.crew_ctrl
         rec_flag = self._recording(p)
         a, rec = ctrl.decide(self, p, legal, rec_flag)
         if rec_flag:
@@ -518,6 +837,15 @@ class RTWorld(AmongUsEnv):
             return ("task", self.room[p], 0)
         if a == REPORT:
             return ("report",)
+        if a == EMERGENCY:
+            return ("emergency",)
+        if a in (VENT_A, VENT_B):
+            links = M.VENT_LINKS[self.room[p]]
+            return ("vent", self.room[p], links[0 if a == VENT_A else 1])
+        if a == SABOTAGE:
+            return ("sabotage",)
+        if a == FIX:
+            return ("fix",)
         cands = [q for q in self.crew_alive() if self.room[q] == self.room[p]]
         if not cands:
             return ("wait", self.time + 0.5)
@@ -560,25 +888,58 @@ class RTWorld(AmongUsEnv):
             done = True
             if self.can_report(p):
                 self.start_meeting(p)
+        elif kind == "emergency":
+            done = True
+            if self.can_emergency(p):
+                self.start_meeting(p, emergency=True)
+        elif kind == "sabotage":
+            done = True
+            self.sabotage()
+        elif kind == "fix":
+            if not self.lights_off:
+                done = True
+            else:
+                fx, fy = M.fix_pos()
+                if math.hypot(fx - self.x[p], fy - self.y[p]) > 40:
+                    self._steer(p, ("fix", M.FIX_ROOM), dt)
+                    if self.time - ag["t0"] > 16:
+                        done = True
+                else:
+                    self.working[p] = True
+                    done = self._fix(p, dt)
+        elif kind == "vent":
+            src, dst = m[1], m[2]
+            if len(m) == 3:                            # 1) aller jusqu'à la grille
+                vx, vy = M.vent_pos(src)
+                if math.hypot(vx - self.x[p], vy - self.y[p]) > 40:
+                    self._steer(p, ("vent", src), dt)
+                    if self.time - ag["t0"] > 16 or self.room[p] != src:
+                        done = True
+                else:                                  # 2) traverser le conduit (invisible)
+                    self.vent(p, dst)
+                    ag["macro"] = ("vent", src, dst, self.time + rt.vent_time)
+            elif self.time >= m[3]:                    # 3) ressortir
+                self._vent_exit(p)
+                done = True
         elif kind == "kill":
             tgt = m[1]
             if (not self.alive[tgt]) or self.room[tgt] != self.room[p] or self.time > m[2]:
                 done = True
             else:
                 self._toward(p, self.x[tgt], self.y[tgt], dt)
-                if self.dist(p, tgt) <= rt.kill_range and self.cd_s <= 0:
+                if self.dist(p, tgt) <= rt.kill_range and self.kcd[p] <= 0:
                     self.do_kill(p, tgt)
                     done = True
         if done:
             ag["macro"] = None
 
 
-def run_game(world: RTWorld, crew, imp, dt: float = 0.1, imposter: int | None = None,
+def run_game(world: RTWorld, crew, imp, dt: float = 0.1, imposter=None,
              max_ticks: int = 20000, record_crew: bool = False, record_imp: bool = False,
-             crew_vote=None, imp_vote=None):
-    """Joue une partie complète sans affichage. Renvoie des statistiques (trajectoires dans world.traj / vtraj)."""
+             crew_vote=None, imp_vote=None, imp_claim=None):
+    """Joue une partie complète sans affichage. Renvoie des statistiques (trajectoires dans world.traj / vtraj / ctraj)."""
     world.reset(imposter)
-    world.set_controllers(crew, imp, record_crew, record_imp, crew_vote, imp_vote)
+    world.set_controllers(crew, imp, record_crew, record_imp, crew_vote, imp_vote, imp_claim)
     n = 0
     while world.winner is None and n < max_ticks:
         world.update(dt)
@@ -588,4 +949,5 @@ def run_game(world: RTWorld, crew, imp, dt: float = 0.1, imposter: int | None = 
     return dict(winner=world.winner or "imp", reason=world.reason or "timeout", seconds=world.time,
                 kills=st["kills"], meetings=st["meetings"], good_ejections=st["good_ejections"],
                 wrong_ejections=st["wrong_ejections"], tasks_done=st["tasks_done"],
-                witnessed_kills=st["witnessed_kills"], skipped_votes=st["skipped_votes"])
+                witnessed_kills=st["witnessed_kills"], skipped_votes=st["skipped_votes"],
+                emergencies=st.get("emergencies", 0))

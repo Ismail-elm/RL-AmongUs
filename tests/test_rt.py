@@ -26,18 +26,18 @@ class TestRT(unittest.TestCase):
     def test_full_game_and_determinism(self):
         res = []
         for _ in range(2):
-            w = RTWorld(Config(), seed=3)
+            w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=3)
             res.append(run_game(w, ScriptedCrew(), ScriptedImposter(2)))
         self.assertIn(res[0]["winner"], ("crew", "imp"))
         self.assertEqual(res[0], res[1])
 
     def test_kill_and_meeting(self):
-        w = RTWorld(Config(), seed=1)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=1)
         w.reset(0)
         w.set_controllers(ScriptedCrew(), ScriptedImposter(2))
         v = 1
         w.x[0], w.y[0] = w.x[v] + 30, w.y[v]
-        w.cd_s = 0
+        w.kcd[0] = 0
         n = len(w.crew_alive())
         w.do_kill(0, v)
         self.assertFalse(w.alive[v])
@@ -49,7 +49,7 @@ class TestRT(unittest.TestCase):
     def test_imposter_can_report(self):
         """Comme dans le vrai jeu, l'imposteur peut signaler un corps : celui qui signale n'est pas forcément innocent."""
         from amongus.env import REPORT
-        w = RTWorld(Config(), seed=1)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=1)
         w.reset(0)
         w.set_controllers(ScriptedCrew(), ScriptedImposter(2))
         self.assertNotIn(REPORT, w.legal_actions(0))            # pas de corps : rien à signaler
@@ -67,20 +67,25 @@ class TestRT(unittest.TestCase):
         self.assertEqual(len(ev), 1)
         self.assertEqual(ev[0]["reporter"], 0)
 
-    def test_old_model_without_report_action(self):
-        """Un acteur à 15 sorties (avant « signaler ») reste jouable : il ne signale simplement jamais."""
+    def test_actor_with_fewer_outputs(self):
+        """Un acteur entraîné avec moins d'actions (avant « signaler » et « urgence ») ne choisit jamais celles qui
+        lui manquent."""
         import numpy as np
         from amongus.ai import obs as O
         from amongus.ai.policy import NumpyActor, PolicyCtrl
-        from amongus.env import N_ACTIONS, REPORT
+        from amongus.env import EMERGENCY, N_ACTIONS, REPORT
         oc, oi, _, _ = O.dims()
         r = np.random.default_rng(0)
-        old = lambda d: [(r.normal(0, .3, (d, 8)), np.zeros(8)), (r.normal(0, .3, (8, N_ACTIONS - 1)), np.zeros(N_ACTIONS - 1))]
-        w = RTWorld(Config(), seed=2)
+        k = REPORT                                   # sorties 0..REPORT-1 : ni signaler, ni urgence, ni conduits...
+        old = lambda d: [(r.normal(0, .3, (d, 8)), np.zeros(8)), (r.normal(0, .3, (8, k)), np.zeros(k))]
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=2)
         res = run_game(w, PolicyCtrl(NumpyActor(old(oc)), seed=1), PolicyCtrl(NumpyActor(old(oi)), seed=2),
-                       record_imp=True)
+                       record_crew=True, record_imp=True)
         self.assertIn(res["winner"], ("crew", "imp"))
-        self.assertTrue(all(s["act"] != REPORT for s in w.traj[w.imp]))
+        acts = [s["act"] for p in range(w.n) for s in w.traj[p]]
+        self.assertTrue(acts)
+        self.assertTrue(all(a < k for a in acts))
+        self.assertLess(EMERGENCY, N_ACTIONS)
 
 
 if __name__ == "__main__":
