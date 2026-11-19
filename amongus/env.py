@@ -30,14 +30,20 @@ WAIT = N_ROOMS
 TASK = N_ROOMS + 1
 KILL = N_ROOMS + 2
 REPORT = N_ROOMS + 3     # imposteur (monde temps réel) : signaler lui-même un corps, comme dans le vrai jeu
-N_ACTIONS = N_ROOMS + 4
+EMERGENCY = N_ROOMS + 4  # monde temps réel : bouton de réunion d'urgence (Cafétéria, une fois par joueur)
+VENT_A = N_ROOMS + 5     # imposteur : conduit vers la 1re salle reliée à la grille de sa salle
+VENT_B = N_ROOMS + 6     # imposteur : conduit vers la 2e salle reliée
+SABOTAGE = N_ROOMS + 7   # imposteur : couper les lumières
+FIX = N_ROOMS + 8        # crewmate : réparer les lumières (panneau d'Électricité)
+N_ACTIONS = N_ROOMS + 9
 NONE_HINT = N_ROOMS  # « pas de direction »
 
 
 def action_name(a: int) -> str:
     if a < N_ROOMS:
         return f"aller {ROOMS[a]}"
-    return {WAIT: "attendre", TASK: "tâche", KILL: "KILL", REPORT: "signaler"}[a]
+    return {WAIT: "attendre", TASK: "tâche", KILL: "KILL", REPORT: "signaler", EMERGENCY: "réunion d'urgence",
+            VENT_A: "conduit A", VENT_B: "conduit B", SABOTAGE: "saboter les lumières", FIX: "réparer les lumières"}[a]
 
 
 @dataclass
@@ -46,6 +52,14 @@ class Kill:
     room: int
     victim: int
     witnesses: list[int]
+    # monde temps réel : instantané au moment du meurtre (pour recouper les déclarations en réunion)
+    t: float = 0.0
+    zone: dict = field(default_factory=dict)     # joueur -> salle où il était (couloir : salle la plus proche)
+    rooms: dict = field(default_factory=dict)    # joueur -> salle exacte (-1 : couloir)
+    sight: dict = field(default_factory=dict)    # joueur -> ensemble des joueurs qu'il voyait
+    dark: bool = False                           # lumières coupées au moment du meurtre
+    killer: int = -1                             # qui a tué
+    killer: int = -1                             # qui a tué
 
 
 @dataclass
@@ -54,29 +68,51 @@ class MeetingCtx:
     bodies: list[tuple[int, int]]          # (salle, victime)
     cleared: set[int]                       # joueurs innocentés par des témoignages
     witnesses: list[int]                    # crewmates vivants ayant vu le meurtre
-    imposter: int                           # (usage interne : témoignages honnêtes)
+    imposter: int                           # (usage interne : témoignages honnêtes) premier imposteur
     votes: dict = field(default_factory=dict)
+    # monde temps réel : discussion
+    emergency: bool = False                 # réunion d'urgence (bouton) plutôt que corps signalé
+    kill_room: int = -1                     # salle du meurtre de référence (-1 : aucun meurtre depuis la réunion)
+    ref: object = None                      # ce meurtre (Kill), avec l'instantané de qui était où
+    shared: object = None                   # crewmate -> joueurs dont il parle (mémoire imparfaite) ; None : tous
+    claims: dict = field(default_factory=dict)    # joueur -> salle où il DIT avoir été au moment du meurtre
+    accuse: dict = field(default_factory=dict)    # joueur -> joueur qu'il accuse (« je l'ai vu tuer »)
+    confirm: dict = field(default_factory=dict)   # joueur -> crewmates qui l'ont vu là où il le dit
+    contra: dict = field(default_factory=dict)    # joueur -> crewmates qui l'ont vu AILLEURS
+    absent: dict = field(default_factory=dict)    # joueur -> crewmates présents dans cette salle, qui ne l'y ont pas vu
 
 
 class AmongUsEnv:
     def __init__(self, cfg: Config | None = None, seed: int | None = None):
         self.cfg = cfg or Config()
-        self.n = self.cfg.n_crew + 1
+        self.n_imp = self._n_imp()
+        self.n = self.cfg.n_crew + self.n_imp
         self.rng = random.Random(seed)
         # callbacks de vote pour des joueurs « externes » (humain) : f(env, joueur, ctx) -> joueur | None
         self.vote_callbacks: dict[int, callable] = {}
         self.reset()
 
+    def _n_imp(self) -> int:
+        return 1                    # jeu tour par tour : un seul imposteur
+
     # ------------------------------------------------------------------ reset
-    def reset(self, imposter: int | None = None) -> "AmongUsEnv":
+    def reset(self, imposter=None) -> "AmongUsEnv":
+        """imposter : None (tirage), un joueur (les autres imposteurs sont tirés au sort) ou une liste de joueurs."""
         n, cfg = self.n, self.cfg
-        self.imp = self.rng.randrange(n) if imposter is None else imposter
+        if imposter is None:
+            imps = self.rng.sample(range(n), self.n_imp)
+        elif isinstance(imposter, int):
+            imps = [imposter] + self.rng.sample([p for p in range(n) if p != imposter], self.n_imp - 1)
+        else:
+            imps = list(imposter)
+        self.imps = sorted(imps)
+        self.imp = imps[0]          # « l'imposteur » quand il n'y en a qu'un
         self.room = [0] * n
         self.alive = [True] * n
         self.tasks: list[set[int]] = [set() for _ in range(n)]
         self.progress = [0] * n
         for p in range(n):
-            if p != self.imp:
+            if p not in self.imps:
                 self.tasks[p] = set(self.rng.sample(range(1, N_ROOMS), cfg.tasks_per_crew))
         self.cooldown = cfg.kill_cooldown
         self.bodies: list[tuple[int, int]] = []
@@ -93,8 +129,14 @@ class AmongUsEnv:
         return self
 
     # --------------------------------------------------------------- requêtes
+    def is_imp(self, p) -> bool:
+        return p in self.imps
+
     def crew_alive(self) -> list[int]:
-        return [p for p in range(self.n) if p != self.imp and self.alive[p]]
+        return [p for p in range(self.n) if p not in self.imps and self.alive[p]]
+
+    def imps_alive(self) -> list[int]:
+        return [p for p in self.imps if self.alive[p]]
 
     def alive_players(self) -> list[int]:
         return [p for p in range(self.n) if self.alive[p]]
@@ -241,11 +283,14 @@ class AmongUsEnv:
         return rew, term, self.winner is not None
 
     # ------------------------------------------------------------- fin de partie
+    def _parity(self, ac) -> bool:
+        return len(ac) <= max(len(self.imps_alive()), self.cfg.crew_left_to_lose)
+
     def _outcome(self):
-        if not self.alive[self.imp]:
+        if not self.imps_alive():
             return "crew", "ejected"
         ac = self.crew_alive()
-        if len(ac) <= self.cfg.crew_left_to_lose:
+        if self._parity(ac):
             return "imp", "parity"
         if all(not self.tasks[p] for p in ac):
             return "crew", "tasks"
@@ -259,7 +304,7 @@ class AmongUsEnv:
         for p in range(self.n):
             if term[p]:
                 continue
-            if p == self.imp:
+            if self.is_imp(p):
                 rew[p] += cfg.r_imp_win if winner == "imp" else cfg.r_imp_loss
             elif self.alive[p]:
                 rew[p] += cfg.r_crew_win if winner == "crew" else cfg.r_crew_loss
@@ -291,6 +336,9 @@ class AmongUsEnv:
                     witnesses.append(w)
         return cleared, witnesses
 
+    def _prepare_meeting(self, ctx: MeetingCtx):
+        """Avant le vote (monde temps réel : déclarations et recoupements). Rien dans le jeu tour par tour."""
+
     def ai_vote(self, voter: int, ctx: MeetingCtx):
         """Vote heuristique (non appris) des joueurs contrôlés par l'IA."""
         alive = self.alive_players()
@@ -310,6 +358,10 @@ class AmongUsEnv:
         cleared, witnesses = self._evidence()
         ctx = MeetingCtx(reporter=reporter, bodies=list(self.bodies), cleared=cleared,
                          witnesses=witnesses, imposter=self.imp)
+        ctx.imposters = list(self.imps)
+        ctx.imposters = list(self.imps)
+        self._prepare_meeting(ctx)
+        cleared = ctx.cleared
         votes: dict[int, int | None] = {}
         for v in self.alive_players():
             cb = self.vote_callbacks.get(v)
@@ -329,7 +381,7 @@ class AmongUsEnv:
         if ejected is not None:
             self.alive[ejected] = False
             term[ejected] = True
-            if ejected == self.imp:
+            if self.is_imp(ejected):
                 rew[ejected] += cfg.r_imp_loss
                 self.stats["good_ejections"] += 1
             else:
@@ -337,8 +389,9 @@ class AmongUsEnv:
                 self.stats["wrong_ejections"] += 1
         self.events.append(dict(type="meeting", reporter=reporter, bodies=list(self.bodies),
                                 votes=votes, ejected=ejected,
-                                was_imposter=(ejected == self.imp) if ejected is not None else None,
-                                cleared=sorted(cleared), witnesses=list(witnesses), ctx=ctx))
+                                was_imposter=self.is_imp(ejected) if ejected is not None else None,
+                                cleared=sorted(cleared), witnesses=list(witnesses), ctx=ctx,
+                                emergency=ctx.emergency))
         # retour en Cafétéria
         self.bodies = []
         self.kills = []

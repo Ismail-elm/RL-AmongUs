@@ -7,6 +7,7 @@ from ..config import Config
 from ..rt_world import RTConfig, RTWorld, RewardConfig, run_game
 from .bots import RandomCtrl, ScriptedCrew, ScriptedImposter
 from .policy import NumpyActor, PolicyCtrl
+from .claim import ClaimCtrl
 from .vote import TeacherVote, VoteCtrl
 
 _world = None
@@ -15,7 +16,7 @@ _world = None
 def _get_world():
     global _world
     if _world is None:
-        _world = RTWorld(Config(), RTConfig(), seed=0, rw=RewardConfig())
+        _world = RTWorld(Config.players(), RTConfig(), seed=0, rw=RewardConfig())
     return _world
 
 
@@ -40,6 +41,13 @@ def make_vote(src, seed, greedy=False):
     return VoteCtrl(NumpyActor(src[1]), seed=seed, greedy=greedy)
 
 
+def make_claim(src, seed, greedy=False):
+    """src : None -> règle heuristique ; ('net', params) -> déclaration apprise de l'imposteur."""
+    if src is None or src[0] != "net" or src[1] is None:
+        return None
+    return ClaimCtrl(NumpyActor(src[1]), seed=seed, greedy=greedy)
+
+
 def _stack(traj):
     return dict(
         obs=np.stack([s["obs"] for s in traj]), crit=np.stack([s["crit"] for s in traj]),
@@ -50,10 +58,11 @@ def _stack(traj):
 
 
 def play_batch(task):
-    """task : dict(specs=[dict(seed, crew, imp, crew_vote, imp_vote, rec_crew, rec_imp)], greedy=bool).
-    Renvoie (stats par partie, trajectoires crew, trajectoires imposteur, votes crew, votes imposteur)."""
+    """task : dict(specs=[dict(seed, crew, imp, crew_vote, imp_vote, imp_claim, rec_crew, rec_imp)], greedy=bool).
+    Renvoie (stats par partie, trajectoires crew, trajectoires imposteur, votes crew, votes imposteur,
+    déclarations de l'imposteur)."""
     w = _get_world()
-    stats, crew_tr, imp_tr, crew_vt, imp_vt = [], [], [], [], []
+    stats, crew_tr, imp_tr, crew_vt, imp_vt, imp_ct = [], [], [], [], [], []
     for sp in task["specs"]:
         w.rng.seed(sp["seed"])
         crew = make_ctrl(sp["crew"], "crew", sp["seed"] + 1, task.get("greedy", False))
@@ -61,17 +70,18 @@ def play_batch(task):
         greedy = task.get("greedy", False)
         r = run_game(w, crew, imp, record_crew=sp.get("rec_crew", False), record_imp=sp.get("rec_imp", False),
                      crew_vote=make_vote(sp.get("crew_vote"), sp["seed"] + 3, greedy),
-                     imp_vote=make_vote(sp.get("imp_vote"), sp["seed"] + 4, greedy))
+                     imp_vote=make_vote(sp.get("imp_vote"), sp["seed"] + 4, greedy),
+                     imp_claim=make_claim(sp.get("imp_claim"), sp["seed"] + 5, greedy))
         r["tag"] = sp.get("tag")
         stats.append(r)
-        if sp.get("rec_crew"):
-            for q in range(w.n):
-                if q != w.imp and w.traj[q]:
-                    crew_tr.append(_stack(w.traj[q]))
-                if q != w.imp and w.vtraj[q]:
-                    crew_vt.append(_stack(w.vtraj[q]))
-        if sp.get("rec_imp") and w.traj[w.imp]:
-            imp_tr.append(_stack(w.traj[w.imp]))
-        if sp.get("rec_imp") and w.vtraj[w.imp]:
-            imp_vt.append(_stack(w.vtraj[w.imp]))
-    return stats, crew_tr, imp_tr, crew_vt, imp_vt
+        for q in range(w.n):
+            if q in w.imps:
+                if sp.get("rec_imp"):
+                    for src, dst in ((w.traj, imp_tr), (w.vtraj, imp_vt), (w.ctraj, imp_ct)):
+                        if src[q]:
+                            dst.append(_stack(src[q]))
+            elif sp.get("rec_crew"):
+                for src, dst in ((w.traj, crew_tr), (w.vtraj, crew_vt)):
+                    if src[q]:
+                        dst.append(_stack(src[q]))
+    return stats, crew_tr, imp_tr, crew_vt, imp_vt, imp_ct

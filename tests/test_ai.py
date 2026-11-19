@@ -5,6 +5,7 @@ from amongus.ai import obs as O
 from amongus.ai.bots import RandomCtrl, ScriptedCrew, ScriptedImposter
 from amongus.ai.policy import NumpyActor, PolicyCtrl, load_actors, save_actors
 from amongus.env import N_ACTIONS
+from amongus.config import Config
 from amongus.rt_world import RTWorld, run_game
 
 
@@ -16,7 +17,7 @@ def random_actor(d_in, h=16, seed=0):
 class TestAI(unittest.TestCase):
     def test_obs_shapes_and_finite(self):
         oc, oi, cc, ci = O.dims()
-        w = RTWorld(seed=3)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=3)
         run_game(w, ScriptedCrew(), ScriptedImposter(1))
         w.reset(imposter=2)
         w.set_controllers(ScriptedCrew(), ScriptedImposter(1))
@@ -35,7 +36,7 @@ class TestAI(unittest.TestCase):
         oc, oi, cc, ci = O.dims()
         crew = PolicyCtrl(NumpyActor(random_actor(oc)), seed=1)
         imp = PolicyCtrl(NumpyActor(random_actor(oi)), seed=2)
-        w = RTWorld(seed=4)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=4)
         run_game(w, crew, imp, record_crew=True, record_imp=True)
         tr = [t for p in range(w.n) for t in [w.traj[p]] if t]
         self.assertTrue(tr)
@@ -57,7 +58,7 @@ class TestAI(unittest.TestCase):
         np.testing.assert_allclose(ca.logits(x), NumpyActor(a).logits(x), rtol=1e-5)
 
     def test_bots_finish_games(self):
-        w = RTWorld(seed=9)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=9)
         for imp in (ScriptedImposter(1), ScriptedImposter(1, prudent=True), RandomCtrl(1)):
             r = run_game(w, ScriptedCrew(), imp)
             self.assertIn(r["winner"], ("crew", "imp"))
@@ -71,7 +72,7 @@ class TestAI(unittest.TestCase):
         from amongus.ai.rollout import _stack
         oc, oi, cc, ci = O.dims()
         crew = PolicyCtrl(NumpyActor(random_actor(oc)), seed=1)
-        w = RTWorld(seed=4)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=4)
         run_game(w, crew, ScriptedImposter(1), record_crew=True)
         trajs = [_stack(w.traj[p]) for p in range(w.n) if w.traj[p]]
         learner = RoleLearner(oc, cc, hidden=16)

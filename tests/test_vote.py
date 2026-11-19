@@ -9,6 +9,7 @@ from amongus.ai import vote as V
 from amongus.ai.bots import ScriptedCrew, ScriptedImposter
 from amongus.ai.policy import NumpyActor, PolicyCtrl, load_actors, load_vote_actors, save_actors
 from amongus.env import MeetingCtx, N_ACTIONS
+from amongus.config import Config
 from amongus.rt_world import RTWorld, run_game
 
 
@@ -32,7 +33,7 @@ def play_until_meeting(crew_vote=None, imp_vote=None, record=False, max_seeds=30
     """Joue des parties jusqu'à en trouver une avec au moins une réunion."""
     oc, oi, _, _ = O.dims()
     for seed in range(max_seeds):
-        w = RTWorld(seed=seed)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=seed)
         r = run_game(w, PolicyCtrl(NumpyActor(random_actor(oc, N_ACTIONS)), seed=seed) if record else ScriptedCrew(),
                      ScriptedImposter(seed), record_crew=record, record_imp=False,
                      crew_vote=crew_vote, imp_vote=imp_vote)
@@ -44,20 +45,20 @@ def play_until_meeting(crew_vote=None, imp_vote=None, record=False, max_seeds=30
 class TestVote(unittest.TestCase):
     def test_obs_and_mask(self):
         vo, vc = V.dims()
-        w = RTWorld(seed=1)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=1)
         w.reset(imposter=3)
         w.alive[5] = False
         ctx = MeetingCtx(reporter=2, bodies=[(1, 5)], cleared={4}, witnesses=[], imposter=3)
         o, c, m = V.build(w, 0, ctx)
         self.assertEqual((len(o), len(c)), (vo, vc))
         self.assertTrue(np.isfinite(o).all())
-        self.assertEqual(m.tolist(), [True, True, True, True, False, True, True])   # joueur 5 mort, « passer » permis
+        self.assertEqual(m.tolist(), [True, True, True, True, False, True] + [False] * 3 + [True])   # 7 joueurs : 3 cases vides   # joueur 5 mort, « passer » permis
 
     def test_seen_with_victim(self):
         """Un crewmate voit Rouge (0) à côté de la future victime (1) : après le meurtre, c'est un témoignage public
         contre Rouge, même si c'est Rouge qui signale le corps."""
         from amongus import rt_map as M
-        w = RTWorld(seed=1)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=1)
         w.reset(imposter=0)
         w.x[0], w.y[0] = w.x[1] + 30, w.y[1]                 # l'imposteur colle la victime
         for q in range(3, w.n):                              # les autres sont loin ; 2 reste et regarde
@@ -79,7 +80,7 @@ class TestVote(unittest.TestCase):
         self.assertIsNone(priv[0])                           # 3 ne l'a pas vu lui-même…
         self.assertIsNotNone(V.victim_testimony(w, ctx, voter=2)[1][0])      # …mais 2, oui
         o = V.vote_obs(w, 3, ctx)
-        row = o[V.N_GLOBAL:].reshape(w.n - 1, V.VOTE_F)[(0 - 3 - 1) % w.n]  # la case de Rouge vue par 3
+        row = o[V.N_GLOBAL:].reshape(V.N_SLOTS, V.VOTE_F)[(0 - 3 - 1) % w.n]  # la case de Rouge vue par 3
         self.assertEqual((row[3], row[10], row[12]), (1.0, 1.0, 1.0))        # a signalé ET vu en dernier avec la victime
 
     def test_old_vote_network_is_ignored(self):
@@ -93,7 +94,7 @@ class TestVote(unittest.TestCase):
 
     def test_action_maps_to_player(self):
         vo, _ = V.dims()
-        w = RTWorld(seed=1)
+        w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=1)
         w.reset(imposter=3)
         ctx = MeetingCtx(reporter=2, bodies=[], cleared=set(), witnesses=[], imposter=3)
         ctrl = V.VoteCtrl(NumpyActor(random_actor(vo, V.N_VOTE)), seed=0)
@@ -108,17 +109,17 @@ class TestVote(unittest.TestCase):
 
     def test_default_is_heuristic(self):
         """Sans réseau de vote, le comportement est celui de la règle de base (parties identiques)."""
-        a = run_game(RTWorld(seed=5), ScriptedCrew(), ScriptedImposter(2))
-        b = run_game(RTWorld(seed=5), ScriptedCrew(), ScriptedImposter(2), crew_vote=None, imp_vote=None)
+        a = run_game(RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=5), ScriptedCrew(), ScriptedImposter(2))
+        b = run_game(RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=5), ScriptedCrew(), ScriptedImposter(2), crew_vote=None, imp_vote=None)
         self.assertEqual(a, b)
 
     def test_unanimous_vote_ejects(self):
         """Si tous les crewmates votent contre le même joueur, il est éjecté à la première réunion."""
         for seed in range(30):
-            w = RTWorld(seed=seed)
+            w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=seed)
             w.reset()
             imp = w.imp
-            w = RTWorld(seed=seed)
+            w = RTWorld(Config(n_crew=6, n_imp=1, crew_left_to_lose=2), seed=seed)
             r = run_game(w, ScriptedCrew(), ScriptedImposter(seed), imposter=imp, crew_vote=FixedVote(imp))
             if r["meetings"] > 0:
                 self.assertEqual((r["winner"], r["reason"], r["good_ejections"]), ("crew", "ejected", 1))
