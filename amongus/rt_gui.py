@@ -189,6 +189,9 @@ class RTApp(UIBase):
         self.btn_use = pygame.Rect(W - 150, H - 130, 120, 100)
         self.btn_report = pygame.Rect(W - 150, H - 244, 120, 100)
         self.btn_emergency = pygame.Rect(W - 290, H - 130, 120, 100)
+        self.btn_vent = pygame.Rect(W - 290, H - 130, 120, 100)
+        self.btn_sabotage = pygame.Rect(W - 290, H - 244, 120, 100)
+        self.btn_map = pygame.Rect(W - 140, 206, 120, 34)
         self.new_game()
 
     # ------------------------------------------------------------ écran
@@ -227,6 +230,12 @@ class RTApp(UIBase):
         self.setup_display(not self.fullscreen)
 
     # ------------------------------------------------------------ nouvelle partie
+    def layout_buttons(self):
+        """Boutons d'action en bas à droite, comme dans le jeu : la colonne de droite (utiliser / tuer, signaler)
+        est commune ; l'imposteur a en plus conduit et sabotage, et le bouton d'urgence se décale."""
+        imp = self.human is not None and self.human in self.world.imps
+        self.btn_emergency = pygame.Rect(W - (430 if imp else 290), H - 130, 120, 100)
+
     def new_game(self):
         w = self.world
         imposter = None
@@ -248,6 +257,7 @@ class RTApp(UIBase):
         if self.human is not None:
             w.vote_callbacks[self.human] = self.human_vote
             w.claim_callbacks[self.human] = self.human_claim
+        self.layout_buttons()
         self.log.clear()
         self.known_dead = set()
         self.over = False
@@ -629,6 +639,7 @@ class RTApp(UIBase):
             ST.ocircle(self.screen, COLORS[p], c, 4, 2)
             if p == h:
                 D.circle(self.screen, (255, 255, 255), c, 8, 2)
+        self.draw_map_button()
         # journal
         yy = H - 28 - 19 * min(5, len(self.log))
         for msg, col in list(self.log)[-5:]:
@@ -646,6 +657,11 @@ class RTApp(UIBase):
         else:
             hint = "ZQSD : bouger   E : tâche / réparer   R : signaler   U : urgence   M : carte   Échap"
         self.otext(hint, (W // 2, H - 10), 11, (205, 212, 228), center=True, width=1)
+
+    def draw_map_button(self):
+        r, hover = self.btn_map, self.btn_map.collidepoint(self.mouse_pos())
+        ST.orect(self.screen, ST.shade(ST.PANEL, 1.06) if hover or self.show_map else ST.PANEL, r, 10, 3)
+        self.text("CARTE  [M]", r.center, 15, ST.INK, True, center=True)
 
     def draw_report_button(self):
         w = self.world
@@ -669,8 +685,22 @@ class RTApp(UIBase):
             if w.cd_s > 0:
                 self.round_button(self.btn_use, str(int(math.ceil(w.cd_s))), "recharge", False, ST.RED, big=True)
             else:
-                self.round_button(self.btn_use, "KILL", "[K]" if ready else "trop loin", ready, ST.RED,
+                self.round_button(self.btn_use, "TUER", "[K]" if ready else "trop loin", ready, ST.RED,
                                   self.btn_use.collidepoint(mouse))
+            # conduit : prochaine sortie affichée
+            can_v = w.human_can_vent()
+            if can_v:
+                links = M.VENT_LINKS[w.room[h]]
+                sub = "vers " + ROOMS[links[w.vent_idx % len(links)]] + " [C]"
+            else:
+                sub = "près d'une grille"
+            self.round_button(self.btn_vent, "CONDUIT", sub, can_v, (96, 110, 138), self.btn_vent.collidepoint(mouse))
+            # sabotage des lumières
+            can_s = w.can_sabotage()
+            sub = ("lumières [L]" if can_s else "en cours" if w.lights_off
+                   else f"dans {int(w.sab_ready_t - w.time) + 1} s")
+            self.round_button(self.btn_sabotage, "SABOTAGE", sub, can_s, (150, 70, 190),
+                              self.btn_sabotage.collidepoint(mouse))
             return
         near = w.my_task_nearby(h)
         if near is None and w.near_fix(h):
@@ -780,6 +810,8 @@ class RTApp(UIBase):
                         self.cam[0] -= e.rel[0]
                         self.cam[1] -= e.rel[1]
                         self.clamp_camera()
+                    elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and self.btn_map.collidepoint(e.pos):
+                        self.show_map = not self.show_map
                     elif self.human is None and e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                         if self.show_map and self._bigmap:
                             pos, sc = self._bigmap
@@ -799,6 +831,10 @@ class RTApp(UIBase):
                             w.human_emergency()
                         elif self.human_is_imp and self.btn_use.collidepoint(e.pos):
                             w.human_kill()
+                        elif self.human_is_imp and self.btn_vent.collidepoint(e.pos):
+                            w.human_vent()
+                        elif self.human_is_imp and self.btn_sabotage.collidepoint(e.pos):
+                            w.human_sabotage()
                 self.process_events()
                 if self.over:
                     break
