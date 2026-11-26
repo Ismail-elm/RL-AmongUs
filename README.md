@@ -6,6 +6,12 @@ sont entraînés par **MAPPO** (Multi-Agent PPO, entraînement centralisé / ex�
 > Projet de fan, non commercial, sans lien avec Innersloth. « Among Us » est une marque d'Innersloth LLC ; ce dépôt
 > n'en reprend aucun élément graphique ni sonore.
 
+| | |
+|---|---|
+| ![Menu](docs/menu.png) | ![En jeu (crewmate)](docs/crewmate.png) |
+| ![Réunion](docs/reunion.png) | ![Imposteur : boutons d'action](docs/imposteur.png) |
+| ![Éjection](docs/ejection.png) | ![Spectateur](docs/spectateur.png) |
+
 ## Installation
 ```bash
 pip install -r requirements.txt      # numpy + pygame suffisent pour JOUER ; torch + matplotlib pour ENTRAÎNER
@@ -53,7 +59,13 @@ python plot_training.py runs/v5b         # results/training_curves_v5b.png
 python evaluate_mappo.py --n 200         # results/evaluation.md (matrice équipes × imposteurs, IC 95 %)
 python analyze.py elo runs/v5a runs/v5b  # classement Elo des checkpoints (les deux camps progressent-ils vraiment ?)
 python analyze.py behavior runs/v5b/latest.npz   # conduits, sabotages, mensonges, réunions : comment jouent les IA
-python -m unittest discover -s tests     # 65 tests
+python -m unittest discover -s tests     # 75 tests (règles, IA, affichage sans fenêtre)
+python tools_measure.py models/mappo.npz 660     # qui appelle les urgences, et ce qu'elles donnent ; fins de partie
+python tools_endgame.py models/mappo.npz 660     # parties qui démarrent en fin de partie : qui gagne, en combien de temps
+python tools_balance.py models/mappo.npz 440 base "kill_cooldown_s=6"   # équilibre selon un réglage des règles
+python tools_ablation.py models/mappo.npz 440    # quels indices le vote des crewmates utilise-t-il ?
+python tools_crossplay.py models/previous/mappo_v5c.npz models/mappo.npz   # ancien modèle contre nouveau
+python tools_screenshots.py docs                 # captures d'écran du README (sans fenêtre)
 ```
 
 ### Options de l'étape 2 (vote et déclarations appris)
@@ -74,7 +86,7 @@ python -m unittest discover -s tests     # 65 tests
 
 ## Comment ça marche
 **Règles (proches du vrai jeu : 5 crewmates, 2 imposteurs)**
-- Vaisseau continu (12 salles + couloirs, collisions, vision par raycast), kill avec portée et recharge (9 s).
+- Vaisseau continu (12 salles + couloirs, collisions, vision par raycast), kill avec portée et recharge (7 s).
 - **Tâches** : 4 par crewmate, 5 s chacune. Avec 5 tâches de 8 s, la victoire par les tâches était hors de portée
   (4 % des parties IA contre IA) et les crewmates IA ne s'en occupaient presque pas.
 - **Deux imposteurs** : ils se connaissent, ne peuvent pas se tuer ni voter ou s'accuser l'un l'autre, et ont chacun
@@ -91,17 +103,23 @@ python -m unittest discover -s tests     # 65 tests
   Réacteur–O2–Admin). L'imposteur s'y glisse et ressort par une autre grille ; être vu en train d'entrer ou de sortir
   vaut un témoignage direct (le témoin l'accusera en réunion).
 - **Sabotage des lumières** : l'imposteur coupe les lumières (toutes les 30 s au plus) ; la vision des crewmates tombe
-  de 470 à 160 px (lui voit toujours) jusqu'à ce qu'un crewmate répare au panneau d'Électricité (3 s), ou au bout de
+  de 420 à 160 px (lui voit toujours) jusqu'à ce qu'un crewmate répare au panneau d'Électricité (3 s), ou au bout de
   45 s, ou à la réunion suivante. Moins de vision : moins de témoins, et moins de monde pour recouper les déclarations.
-- **Réunions** : chaque réunion consomme 20 s du chrono (330 s par partie). Un corps signalé (automatiquement par les crewmates IA ; l'imposteur peut aussi signaler, par choix) ou
-  le **bouton d'urgence** (Cafétéria, une fois par joueur, pas dans les 15 s après une réunion).
+- **Réunions** : chaque réunion consomme 20 s du chrono (330 s par partie). Un corps signalé (automatiquement par les
+  crewmates IA ; l'imposteur peut aussi signaler, par choix) ou le **bouton d'urgence** (Cafétéria, une fois par joueur,
+  pas avant 45 s de jeu ni dans les 15 s après une réunion). Avant cette limite, les imposteurs IA appuyaient sur le
+  bouton dès le début (77 % des urgences) : sans aucun indice, le vote se faisait au hasard et éjectait un innocent
+  une fois sur trois.
 - **Discussion** : chacun dit où il était au moment du dernier meurtre. Les crewmates disent la vérité ; un témoin direct
   accuse le tueur. L'imposteur parle en dernier : il dit ce qu'il veut (il peut **mentir**) et peut accuser un innocent.
   Puis les crewmates recoupent : « je l'ai vu là » (confirme), « je l'ai vu ailleurs » (contredit), « j'étais dans
-  cette salle et il n'y était pas » (absent). **Mémoire imparfaite** : chacun ne se souvient (et ne parle) que d'environ
-  la moitié des joueurs qu'il a vus (`Config.recall`). **Témoignages flous** : on rapporte la salle (pas la distance
+  cette salle et il n'y était pas » (absent). **Les imposteurs se couvrent** : un imposteur qui dit avoir été dans la
+  même salle que son partenaire le « confirme » (mensonge invérifiable). Sans cela, les crewmates se confirmaient entre
+  eux et éliminaient les deux seuls joueurs que personne ne confirmait. **Mémoire imparfaite** : chacun ne se souvient
+  (et ne parle) que de 40 % des joueurs qu'il a vus (`Config.recall`). **Témoignages flous** : on rapporte la salle (pas la distance
   exacte au corps) et l'ancienneté par tranches de 15 s.
-- **Vote** : chaque joueur vote contre quelqu'un ou passe ; majorité stricte, égalité = personne n'est éjecté.
+- **Vote** : chaque joueur vote contre quelqu'un ou passe ; le joueur qui a le plus de voix est éjecté, sauf égalité
+  ou si « passer » l'emporte (comme dans le vrai jeu).
 
 **IA : MAPPO hiérarchique**
 - *Niveau haut (appris)* : chaque joueur choisit une macro-action quand la précédente est finie — aller dans une salle voisine
@@ -116,7 +134,11 @@ python -m unittest discover -s tests     # 65 tests
   (chacun voit qui est son partenaire).
 - *Critique* (centralisé, seulement à l'entraînement) : observation locale + état global (positions, rôles, tâches de tous).
 - *Récompenses* (`RewardConfig`) : crew — tâche finie partagée par toute l'équipe, travail, mort ; imposteur — kill (bonus
-  s'il n'y a pas de témoin), éjection à tort ; victoire / défaite ±10 ; léger coût de temps.
+  s'il n'y a pas de témoin), éjection à tort, petit coût par passage dans un conduit (sans lui, l'IA faisait des
+  allers-retours dans les conduits au lieu d'aller tuer) ; victoire / défaite ±10 ; léger coût de temps.
+- *Entraînement ciblé des fins de partie* (`--endgame 0.25`) : un quart des parties réseau contre réseau démarrent
+  directement en fin de partie (2 ou 3 crewmates contre 1 ou 2 imposteurs, éparpillés, au milieu du chrono). Ces
+  situations décisives sont rares dans une partie normale : sans cela, l'imposteur seul ne savait pas finir la partie.
 - *PPO* : clip 0,2, GAE λ = 0,95, 4 époques, entropie 0,02 → 0,003, normalisation des retours, arrêt anticipé sur KL.
 - *Auto-jeu avec ligue* : 55 % des parties opposent les derniers réseaux ; sinon l'un des deux camps affronte un ancien snapshot
   ou un bot scripté (imposteur scripté / prudent / aléatoire, crew scripté / aléatoire) — évite que les deux IA se
@@ -129,40 +151,55 @@ python -m unittest discover -s tests     # 65 tests
 - *Déclaration apprise de l'imposteur* (`amongus/ai/claim.py`) : un troisième réseau choisit ce que l'imposteur déclare
   (salle × accusation, 120 choix) en sachant ce que les crewmates ont dit et qui a pu le voir.
   Même PPO, même critique centralisé. Chaque vote (et chaque déclaration) est un épisode à lui seul, récompensé par le
-  résultat de la réunion
-  (imposteur éjecté / innocent éjecté) et, pour les crewmates, par un signal individuel (+1 vote contre l'imposteur,
-  −0,5 contre un innocent) : sans lui, des votes dispersés n'éjectent personne et tous apprennent à passer.
+  résultat de la réunion (imposteur éjecté / innocent éjecté) et, pour les crewmates, par un signal individuel (+1 vote
+  contre un imposteur, −1 contre un innocent) : sans lui, des votes dispersés n'éjectent personne et tous apprennent à
+  passer. Avec −1, voter n'est rentable que si le joueur a plus d'une chance sur deux d'être imposteur : sans indice
+  (une chance sur trois), mieux vaut passer.
 - Inférence en **numpy pur** (`amongus/ai/policy.py`) : le jeu n'a pas besoin de PyTorch.
 
 ## Résultats du modèle fourni (5 + 2, 500 parties/case, % de victoires des crewmates, IC 95 %)
-Le modèle de `models/mappo.npz` est entraîné en trois étapes : 1500 itérations avec vote et déclarations par règles
-(192 000 parties, `runs/v5a`), 800 avec vote et déclarations appris (102 400 parties, `runs/v5b`), puis 300
-d'affinage avec les tâches actuelles (38 400 parties, `runs/v5c`). Environ 2 h 30 sur CPU. Le modèle précédent
-(anciennes tâches) est dans `models/previous/`, l'ancien modèle à 1 imposteur dans `models/old_1imp/` (incompatible).
+Le modèle de `models/mappo.npz` a vu environ 440 000 parties d'entraînement :
+1. 1500 itérations avec vote et déclarations par règles (`runs/v5a`) ;
+2. 800 avec vote et déclarations appris (`runs/v5b`) ;
+3. 300 avec les tâches actuelles (`runs/v5c`) ;
+4. environ 830 d'affinage après les dernières règles (bouton d'urgence à 45 s, vote prudent, imposteurs garants,
+   recharge 7 s, vision 420 px), dont un quart de fins de partie ciblées (`runs/v5d`, `v5e`, `v5f`).
+
+Les modèles précédents sont dans `models/previous/` (anciennes règles) et `models/old_1imp/` (1 imposteur, incompatible).
 
 | Équipe \ Imposteurs | Imp MAPPO | Imp scripté | Imp prudent | Imp aléatoire |
 |---|---|---|---|---|
-| Crew MAPPO | 55% ±4 | 90% ±3 | 89% ±3 | 100% ±1 |
-| Crew scripté | 31% ±4 | 73% ±4 | 68% ±4 | 97% ±1 |
-| Crew aléatoire | 7% ±2 | 23% ±4 | 16% ±3 | 50% ±4 |
+| Crew MAPPO | 54% ±4 | 92% ±2 | 84% ±3 | 99% ±1 |
+| Crew scripté | 22% ±4 | 67% ±4 | 58% ±4 | 97% ±1 |
+| Crew aléatoire | 2% ±1 | 22% ±4 | 17% ±3 | 52% ±4 |
 
 Lecture :
-- **IA contre IA, le jeu est équilibré** (55 % ±4 sur l'évaluation, 49 % sur le rapport de comportement).
+- **IA contre IA, le jeu est équilibré** : 50 à 54 % pour les crewmates selon la mesure. Les fins de partie : parité
+  (imposteurs) 50 %, éjection des deux imposteurs 35 %, tâches 15 %.
 - **Les deux camps ont appris.** Les crewmates MAPPO battent les imposteurs scriptés 9 fois sur 10 ; les imposteurs
-  MAPPO battent les crewmates scriptés 7 fois sur 10.
-- **Deux façons de gagner pour les crewmates.** Fins de partie IA contre IA : parité (imposteurs) 51 %, éjection des
-  imposteurs 27 %, tâches 22 % (4 % avant l'affinage, avec les anciennes tâches).
-- **Elo** (`analyze.py elo`, imposteur scripté = 1000, runs v5a et v5b) : les crewmates passent de 1193 à 1510 et les
-  imposteurs de 1192 à 1380 au fil des checkpoints. Courbe : `results/v5b/elo.png`.
-- **Comportement** (`analyze.py behavior`, 600 parties IA contre IA, parties de 97 s en moyenne) : 2,1 meurtres par
-  partie, 21 % avec témoin ; 6,8 passages par les conduits par partie, rarement vus ; 0,5 sabotage des lumières. Les
-  imposteurs mentent dans 86 % de leurs déclarations et accusent quelqu'un dans 46 % ; 27 % de leurs mensonges sont
-  démasqués par les recoupements. Accusé par un témoin, un imposteur est éjecté 70 % du temps (24 % sans indice).
-- **Limites.** Un innocent est éjecté dans 24 % des réunions ; les réunions d'urgence (41 % des réunions)
-  n'éjectent un imposteur que 6 % du temps. Les crewmates disent toujours la vérité.
+  MAPPO battent les crewmates scriptés près de 8 fois sur 10.
+- **Progrès sur le modèle précédent** (`tools_crossplay.py`, 660 parties par case, règles actuelles) : les nouveaux
+  crewmates gagnent 70 % contre les anciens imposteurs (les anciens crewmates : 43 %), et les nouveaux imposteurs
+  ne laissent que 28 % aux anciens crewmates. Les deux camps sont plus forts, d'où un nouvel équilibre autour de 50 %.
+- **Réunions d'urgence assainies** (`tools_measure.py`). Avant : 77 % étaient appelées par un imposteur dans les 40
+  premières secondes, et 39 % éjectaient un innocent. Maintenant : 7 % sont appelées par un imposteur, et celles des
+  crewmates éjectent un imposteur 58 % du temps. Sur l'ensemble des réunions, un innocent est éjecté 14 à 15 % du
+  temps (24 % avant).
+- **Fins de partie** (`tools_endgame.py`, 2 crewmates contre 1 imposteur, joueurs éparpillés) : l'imposteur gagne en
+  20 s en moyenne avec 3,6 passages par les conduits, contre 56 s et 29 allers-retours dans les conduits avant
+  l'entraînement ciblé.
+- **Les imposteurs ont appris à se couvrir** : avec deux imposteurs en vie, ils se disent dans la même salle dans 85 %
+  des réunions, et 71 % de leurs déclarations ont un « alibi confirmé ». Ils accusent rarement (9 %), car une fausse
+  accusation les trahissait.
+- **Pourquoi ces règles** (`tools_ablation.py`) : en mélangeant un indice entre les joueurs, on voit ce que le vote
+  des crewmates utilise. Le plus décisif était l'« alibi confirmé » : les crewmates se confirmaient entre eux et
+  éliminaient les deux seuls joueurs que personne ne confirmait. D'où la règle des imposteurs garants l'un de l'autre.
+- **Elo** (`analyze.py elo`, runs v5a et v5b) : les crewmates passent de 1193 à 1510 et les imposteurs de 1192 à 1380 au
+  fil des checkpoints. Courbe : `results/v5b/elo.png`.
+- **Limites.** Les crewmates disent toujours la vérité, et la discussion se résume à « où étais-tu » et « qui as-tu vu
+  tuer ». Les états rares restent les moins bien appris : à 3 crewmates contre 1 imposteur, c'est presque pile ou face.
 
-Courbes : `results/training_curves_v5a.png`, `results/training_curves_v5b.png` et `results/training_curves_v5c.png`.
-Évaluation complète : `results/eval_v5c/`.
+Courbes : `results/training_curves_v5a.png` à `results/training_curves_v5f.png`. Évaluation : `results/eval_v5f/`.
 
 ## Structure
 `amongus/rt_world.py` monde temps réel + mémoire + enregistrement des trajectoires · `rt_map.py` carte/navigation/vision ·

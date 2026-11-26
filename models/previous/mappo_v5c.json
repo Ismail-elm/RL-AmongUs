@@ -1,0 +1,9 @@
+{
+  "iter": 300,
+  "games": 38400,
+  "hidden": 128,
+  "vote": "learned",
+  "players": "5+2",
+  "source": "runs/v5a (1500 it) + runs/v5b (800 it, vote appris) + runs/v5c (300 it, taches 4 x 5 s)",
+  "total_iters": 2600
+}

@@ -25,17 +25,19 @@ class RTConfig:
     step_sec: float = 3.5          # durée d'un « pas » de référence (cooldown, escompte)
     speed: float = 240.0           # px/s
     task_time: float = 5.0         # s de travail sur une borne (8 avant)
-    kill_cooldown_s: float = 9.0
+    kill_cooldown_s: float = 7.0   # 9 s avant : sans l'abus du bouton d'urgence, les crewmates gagnaient ~73 %
     kill_range: float = 120
     report_range: float = 330.0
     use_range: float = 120.0
     witness_range: float = 480.0
     vision_range: float = 470.0    # rayon de vision de l'imposteur (mémoire des IA, comme l'affichage)
-    crew_vision_range: float = 470.0   # rayon de vision des crewmates (vrai jeu : plus petit que celui de l'imposteur)
+    crew_vision_range: float = 420.0   # rayon de vision des crewmates (vrai jeu : plus petit que celui de l'imposteur) ; 470 avant
     together_range: float = 300.0  # deux joueurs vus à moins de cette distance l'un de l'autre sont « ensemble »
     emergencies: int = 1           # réunions d'urgence par joueur et par partie (bouton de la Cafétéria)
     emergency_total: int = 99      # réunions d'urgence au total dans la partie (tous joueurs confondus)
-    emergency_cooldown: float = 15.0   # s depuis le début de la partie / la dernière réunion avant de pouvoir l'appeler
+    emergency_cooldown: float = 15.0   # s depuis la dernière réunion avant de pouvoir l'appeler
+    emergency_first: float = 45.0      # s de jeu avant la première urgence possible (avant : personne n'a rien vu, le
+                                       # vote se fait au hasard ; les imposteurs s'en servaient pour faire éjecter un innocent)
     meeting_time: float = 20.0     # s de chrono consommées par chaque réunion (discussion et vote, comme dans le vrai jeu)
     lights_vision: float = 160.0   # vision des crewmates quand les lumières sont coupées
     sabotage_cooldown: float = 30.0    # s entre deux sabotages (et au début de la partie / après une réunion)
@@ -62,11 +64,14 @@ class RewardConfig:
     kill_witnessed: float = -0.5   # imposteur : kill vu par au moins un témoin
     wrong_eject: float = 0.5       # imposteur : un crewmate éjecté à tort
     vote_right: float = 1.0        # crewmate : a voté contre l'imposteur (signal individuel, entraînement seulement)
-    vote_wrong: float = -0.5       # crewmate : a voté contre un innocent (rentable seulement si P(imposteur) > 1/3)
+    vote_wrong: float = -1.0       # crewmate : a voté contre un innocent. Voter n'est rentable que si P(imposteur) > 1/2 :
+                                   # sans indice (P = 1/3 avec 2 imposteurs sur 6), mieux vaut passer
     vote_eject_imp: float = 5.0    # résultat de la réunion, pour chaque votant : imposteur éjecté (signe inversé pour lui)
     vote_eject_crew: float = -2.0  # résultat de la réunion : un innocent éjecté (signe inversé pour l'imposteur)
     imp_ejected: float = -5.0      # imposteur éjecté (sa trajectoire s'arrête ; son partenaire peut encore gagner)
     fix: float = 0.5               # crewmate : a réparé les lumières
+    vent: float = -0.05            # imposteur : chaque passage par un conduit (sans coût, l'IA en abusait comme « attente » :
+                                   # ~28 allers-retours en 50 s en fin de partie au lieu d'aller tuer)
     win: float = 10.0
     loss: float = -10.0
 
@@ -226,7 +231,8 @@ class RTWorld(AmongUsEnv):
         1) Chaque crewmate dit honnêtement où il était ; un témoin direct accuse le tueur.
         2) Chaque imposteur, après les avoir entendus, dit où il était (vrai ou faux) et peut accuser quelqu'un.
         3) Recoupement par les crewmates : « je l'ai vu là » (confirme), « je l'ai vu ailleurs » (contredit),
-           « j'étais dans cette salle et il n'y était pas » (absent). Innocenté = confirmé, hors de la salle du crime."""
+           « j'étais dans cette salle et il n'y était pas » (absent). Innocenté = confirmé, hors de la salle du crime.
+           Un imposteur qui dit avoir été dans la même salle que son partenaire le « confirme » (il ment)."""
         ctx.emergency = self._emergency_now
         self.known_dead |= {p for p in range(self.n) if not self.alive[p]}     # la réunion révèle les morts
         # mémoire imparfaite : chaque crewmate ne se souvient (et ne parle) que d'une partie des joueurs qu'il a vus
@@ -258,6 +264,10 @@ class RTWorld(AmongUsEnv):
                     (conf if ref.zone.get(q) == cr else contra).append(c)
                 elif ref.rooms.get(c, -1) == cr:
                     absent.append(c)
+            if q in self.imps:                     # un imposteur se porte garant de son partenaire s'il dit avoir été
+                for i in self.imps_alive():        # dans la même salle (« on était ensemble ») : mensonge invérifiable
+                    if i != q and ctx.claims.get(i) == cr:
+                        conf.append(i)
             ctx.confirm[q], ctx.contra[q], ctx.absent[q] = conf, contra, absent
             if conf and not contra and not absent and cr != ref.room:
                 cleared.add(q)
@@ -319,7 +329,13 @@ class RTWorld(AmongUsEnv):
 
     def can_emergency(self, p):
         return (self.alive[p] and self.room[p] == 0 and self.emergencies_left[p] > 0 and self.emergency_total_left > 0
+                and self.time >= self.rt.emergency_first
                 and self.time - self.last_meeting_t >= self.rt.emergency_cooldown)
+
+    def emergency_wait(self):
+        """Secondes avant que le bouton d'urgence soit disponible (0 = maintenant)."""
+        return max(0.0, self.rt.emergency_first - self.time,
+                   self.rt.emergency_cooldown - (self.time - self.last_meeting_t))
 
     def _credit_crew(self, r, exclude=None):
         if not self.record_crew:
@@ -460,6 +476,49 @@ class RTWorld(AmongUsEnv):
         if self.time >= self.rt.max_time:
             return "imp", "timeout"
         return None
+
+    ENDGAMES = ((2, 1, 0.35), (3, 2, 0.25), (3, 1, 0.2), (4, 2, 0.2))   # (crewmates, imposteurs vivants, poids)
+
+    def start_endgame(self, rng=None):
+        """Fait démarrer la partie directement en FIN DE PARTIE (entraînement ciblé) : il ne reste que quelques
+        crewmates et un ou deux imposteurs, éparpillés dans le vaisseau, au milieu du chrono. Ces situations sont rares
+        dans une partie normale et décisives (un meurtre de plus fait gagner l'imposteur) : sans cela, l'IA les apprend mal."""
+        rng = rng or self.rng
+        r, acc = rng.random() * sum(w for _, _, w in self.ENDGAMES), 0.0
+        for n_crew, n_imp, wgt in self.ENDGAMES:
+            acc += wgt
+            if r <= acc:
+                break
+        n_imp = min(n_imp, len(self.imps))
+        crew = [p for p in range(self.n) if p not in self.imps]
+        rng.shuffle(crew)
+        imps = list(self.imps)
+        rng.shuffle(imps)
+        dead = crew[n_crew:] + imps[n_imp:]
+        for p in dead:
+            self.alive[p] = False
+        self.known_dead |= set(dead)
+        t0 = rng.uniform(60.0, 210.0)
+        self.time, self.last_meeting_t = t0, t0
+        rooms = list(range(1, 12))
+        for p in range(self.n):
+            if self.alive[p]:
+                self.x[p], self.y[p] = M.room_center(rng.choice(rooms))
+                self.ag[p]["last_room"] = 0
+        done = 0
+        for p in crew[:n_crew]:                        # une partie des tâches est déjà faite
+            ts = sorted(self.tasks[p])
+            k = rng.randint(0, max(0, len(ts) - 1))
+            for t in rng.sample(ts, k):
+                self.tasks[p].discard(t)
+            done += k
+        self.stats["tasks_done"] = done + self.cfg.tasks_per_crew * (len(crew) - n_crew) // 2
+        for i in self.imps:
+            self.kcd[i] = rng.uniform(0.0, self.rt.kill_cooldown_s)
+        self.sab_ready_t = t0 + rng.uniform(0.0, self.rt.sabotage_cooldown)
+        self.emergencies_left = [rng.randint(0, self.rt.emergencies) for _ in range(self.n)]
+        self._update_rooms()
+        return n_crew, n_imp
 
     def tasks_fraction(self):
         """Barre de tâches globale : tâches faites / tâches de départ (elle ne bouge pas quand quelqu'un meurt, sinon
@@ -651,6 +710,8 @@ class RTWorld(AmongUsEnv):
         self.in_vent.add(p)
         self._update_rooms()
         self.events.append(dict(type="vent", player=p, src=src, dst=target, seen=list(seen_in)))
+        if self.record_imp and p in self.imps:
+            self._credit(p, self.rw.vent)
 
     def _vent_exit(self, p):
         self.in_vent.discard(p)
@@ -936,10 +997,13 @@ class RTWorld(AmongUsEnv):
 
 def run_game(world: RTWorld, crew, imp, dt: float = 0.1, imposter=None,
              max_ticks: int = 20000, record_crew: bool = False, record_imp: bool = False,
-             crew_vote=None, imp_vote=None, imp_claim=None):
-    """Joue une partie complète sans affichage. Renvoie des statistiques (trajectoires dans world.traj / vtraj / ctraj)."""
+             crew_vote=None, imp_vote=None, imp_claim=None, endgame: bool = False):
+    """Joue une partie complète sans affichage. Renvoie des statistiques (trajectoires dans world.traj / vtraj / ctraj).
+    endgame : la partie démarre directement en fin de partie (voir RTWorld.start_endgame)."""
     world.reset(imposter)
     world.set_controllers(crew, imp, record_crew, record_imp, crew_vote, imp_vote, imp_claim)
+    if endgame:
+        world.start_endgame()
     n = 0
     while world.winner is None and n < max_ticks:
         world.update(dt)

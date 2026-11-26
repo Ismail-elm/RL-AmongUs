@@ -250,7 +250,7 @@ class UIBase:
             elif self.human is not None and self.human in self.world.imps and p in self.world.imps:
                 self.text("votre partenaire", (r.x + 90, r.y + 50), 14, (176, 32, 40), True)
             elif p in cleared:
-                self.text("innocenté(e)", (r.x + 90, r.y + 50), 14, (30, 128, 58), True)
+                self.text("alibi confirmé", (r.x + 90, r.y + 50), 14, (30, 128, 58), True)
         if reporter:
             chip = pygame.Rect(r.right - 118, r.y + 9, 106, 22)
             ST.orect(self.screen, ST.RED, chip, 11, 2)

@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--ent-end", type=float, default=0.003)
     ap.add_argument("--snap-every", type=int, default=10)
     ap.add_argument("--league-size", type=int, default=24, help="nb max d'anciens réseaux gardés comme adversaires")
+    ap.add_argument("--endgame", type=float, default=0.0,
+                    help="part des parties (réseau contre réseau) qui démarrent directement en fin de partie")
     ap.add_argument("--eval-every", type=int, default=20)
     ap.add_argument("--out", default=os.path.join(HERE, "runs", "mappo"))
     ap.add_argument("--resume", action="store_true")
@@ -187,6 +189,10 @@ def main():
         specs = []
         for _ in range(args.games):
             u, seed = rng.random(), rng.randrange(10 ** 9)
+            if rng.random() < args.endgame:              # entraînement ciblé : fins de partie décisives
+                specs.append(dict(seed=seed, crew=("net", cp), imp=("net", ip), crew_vote=cv, imp_vote=iv, imp_claim=ic,
+                                  rec_crew=True, rec_imp=True, tag="endgame", endgame=True))
+                continue
             if u < 0.55:
                 specs.append(dict(seed=seed, crew=("net", cp), imp=("net", ip), crew_vote=cv, imp_vote=iv, imp_claim=ic,
                                   rec_crew=True, rec_imp=True, tag="self"))

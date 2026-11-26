@@ -130,6 +130,20 @@ class TestRules(unittest.TestCase):
         w.start_meeting(3, emergency=True)
         self.assertEqual((w.winner, w.reason), ("imp", "timeout"))
 
+    def test_endgame_start(self):
+        """Entraînement ciblé : la partie démarre en fin de partie, joueurs placés debout, règles intactes."""
+        for seed in range(20):
+            w = RTWorld(Config(), seed=seed)
+            w.reset()
+            w.set_controllers(ScriptedCrew(), ScriptedImposter(seed))
+            nc, ni = w.start_endgame()
+            self.assertEqual((len(w.crew_alive()), len(w.imps_alive())), (nc, ni))
+            self.assertIsNone(w._outcome())                       # pas déjà finie
+            self.assertTrue(all(M.can_stand(w.x[p], w.y[p]) for p in range(w.n) if w.alive[p]))
+            self.assertGreaterEqual(w.time, 60.0)
+            r = run_game(RTWorld(Config(), seed=seed), ScriptedCrew(), ScriptedImposter(seed), endgame=True)
+            self.assertIn(r["winner"], ("crew", "imp"))
+
     def test_heuristic_claim_avoids_crime_room(self):
         w = staged_kill()
         w.start_meeting(3, emergency=True)
@@ -142,7 +156,11 @@ class TestRules(unittest.TestCase):
         w.set_controllers(ScriptedCrew(), ScriptedImposter(2))
         self.assertNotIn(EMERGENCY, w.legal_actions(2))          # trop tôt
         w.time = w.rt.emergency_cooldown + 1
+        self.assertNotIn(EMERGENCY, w.legal_actions(2))          # pas avant emergency_first (45 s de jeu)
+        self.assertGreater(w.emergency_wait(), 0)
+        w.time = w.rt.emergency_first + 1
         self.assertIn(EMERGENCY, w.legal_actions(2))             # en Cafétéria, après le délai
+        self.assertEqual(w.emergency_wait(), 0)
         w.x[3], w.y[3] = M.task_stand(FAR)
         w._update_rooms()
         self.assertNotIn(EMERGENCY, w.legal_actions(3))          # hors de la Cafétéria

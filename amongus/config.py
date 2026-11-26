@@ -18,7 +18,7 @@ class Config:
                                  # qu'eux (vrai jeu) ; on peut exiger moins : gagner dès qu'il en reste <= cette valeur
     max_steps: int = 100         # temps limite : si la partie dure trop, l'imposteur gagne
     skip_threshold: int = 3      # un crewmate n'ose voter que s'il a <= 3 suspects, sinon il "skip"
-    recall: float = 0.5          # en réunion, proba qu'un crewmate se souvienne de (et parle de) ce qu'il a vu d'un joueur
+    recall: float = 0.4          # en réunion, proba qu'un crewmate se souvienne de (et parle de) ce qu'il a vu d'un joueur
     # --- récompenses ---
     r_step: float = -0.01        # petite pénalité par tour (pousse à agir)
     r_task: float = 2.0          # tâche terminée

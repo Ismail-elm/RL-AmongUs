@@ -71,7 +71,8 @@ def play_batch(task):
         r = run_game(w, crew, imp, record_crew=sp.get("rec_crew", False), record_imp=sp.get("rec_imp", False),
                      crew_vote=make_vote(sp.get("crew_vote"), sp["seed"] + 3, greedy),
                      imp_vote=make_vote(sp.get("imp_vote"), sp["seed"] + 4, greedy),
-                     imp_claim=make_claim(sp.get("imp_claim"), sp["seed"] + 5, greedy))
+                     imp_claim=make_claim(sp.get("imp_claim"), sp["seed"] + 5, greedy),
+                     endgame=sp.get("endgame", False))
         r["tag"] = sp.get("tag")
         stats.append(r)
         for q in range(w.n):

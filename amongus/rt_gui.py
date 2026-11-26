@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import random
+import os
 import sys
 from collections import deque
 
@@ -19,6 +20,31 @@ from .mapdata import ROOMS
 from .rt_world import RTConfig, RTWorld
 
 LIGHT_R = 470
+
+
+def enable_dpi_awareness():
+    """Windows avec mise à l'échelle (125 %, 150 %...) : sans cela, le jeu croit l'écran plus petit qu'il n'est
+    (1536 x 864 au lieu de 1920 x 1080), dessine en basse résolution et Windows l'agrandit (flou)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)       # par écran
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def _new_window(pos, size, flags=0):
+    """Ouvre une fenêtre neuve à la position voulue (SDL ne lit SDL_VIDEO_WINDOW_POS qu'à la création)."""
+    if pygame.display.get_surface() is not None:
+        pygame.display.quit()
+        pygame.display.init()
+        pygame.display.set_caption("Among Us IA — temps réel")
+    os.environ["SDL_VIDEO_WINDOW_POS"] = f"{pos[0]},{pos[1]}"
+    return pygame.display.set_mode(size, flags)
 TICK = 1 / 30
 
 _world_surface = None
@@ -148,6 +174,7 @@ class RTApp(UIBase):
     def __init__(self, cfg: Config, crew_ctrl, imp_ctrl, rt: RTConfig | None = None, human: int | None = 0,
                  human_role: str = "crew", seed: int | None = None, god: bool = False, speed: float = 1.0,
                  crew_vote=None, imp_vote=None, imp_claim=None, fullscreen=False, menu=False):
+        enable_dpi_awareness()
         pygame.init()
         pygame.display.set_caption("Among Us IA — temps réel")
         self.fullscreen = fullscreen
@@ -202,10 +229,13 @@ class RTApp(UIBase):
         sizes = pygame.display.get_desktop_sizes() if hasattr(pygame.display, "get_desktop_sizes") else []
         dw, dh = sizes[0] if sizes else (W, H)
         if self.fullscreen:
-            real = pygame.display.set_mode((dw, dh), pygame.FULLSCREEN)
+            # plein écran « fenêtre sans bordure » à la taille du bureau : la résolution de l'écran ne change pas,
+            # donc les autres applications ne sont pas redimensionnées (contrairement au plein écran exclusif)
+            real = _new_window((0, 0), (dw, dh), pygame.NOFRAME)
         else:
             f = max(1.0, min(dw * 0.92 / W, dh * 0.85 / H))
-            real = pygame.display.set_mode((round(W * f), round(H * f)))
+            size = (round(W * f), round(H * f))
+            real = _new_window(((dw - size[0]) // 2, max(0, (dh - size[1]) // 3)), size)
         rw, rh = real.get_size()
         k = min(rw / W, rh / H)
         self.screen = D.Canvas(real, k, ((rw - W * k) / 2, (rh - H * k) / 2), (W, H))
@@ -505,16 +535,16 @@ class RTApp(UIBase):
         # personnages
         order = sorted((p for p in range(w.n) if w.alive[p] and not (p in w.in_vent and not self.god)),
                        key=lambda q: w.y[q])
+        labels = []
         for p in order:
             if not self.visible(p, h):
                 continue
             sx, sy = w.x[p] - cx, w.y[p] - cy
             if -80 < sx < W + 80 and -100 < sy < H + 100:
                 scene.draw_bot(self.screen, sx, sy + 16, COLORS[p], w.face[p], moving=w.moving[p], t=self.anim_t,
-                               working=w.working[p], label=PLAYER_NAMES[p], font=self.font(14, True), you=(p == h))
-                mate = self.human_is_imp and p in w.imps and p != h
-                if (self.god and p in w.imps) or mate:   # imposteurs (vue debug) ou votre partenaire
-                    ST.ocircle(self.screen, ST.RED, (int(sx), int(sy) - 84), 6, 2)
+                               working=w.working[p])
+                labels.append((p, sx, sy + 16 - 58))
+        self.draw_name_labels(labels, h)
         if h is not None and not w.alive[h]:      # fantôme : translucide
             tmp = D.sprite(120, 140, 1.0, lambda c: scene.draw_bot(
                 c, 60, 100, COLORS[h], w.face[h], moving=w.moving[h], t=self.anim_t,
@@ -545,6 +575,28 @@ class RTApp(UIBase):
         if flip:
             pygame.display.flip()
 
+    def draw_name_labels(self, labels, h):
+        """Noms au-dessus des têtes, dessinés après tous les robots ; deux noms qui se chevauchent sont décalés vers le
+        haut au lieu de se superposer."""
+        w, f = self.world, self.font(14, True)
+        placed = []
+        for p, x, y in sorted(labels, key=lambda t: -t[2]):          # du plus bas au plus haut à l'écran
+            tw, th = f.size(PLAYER_NAMES[p])
+            r = pygame.Rect(0, 0, tw + 8, th)
+            r.midbottom = (int(x), int(y))
+            while any(r.colliderect(q) for q in placed):
+                r.y -= th - 2
+            placed.append(r)
+            if r.bottom < int(y) - 2:                                 # petit trait vers la tête si le nom est décalé
+                D.line(self.screen, (230, 232, 240), (int(x), r.bottom), (int(x), int(y) - 2), 1)
+            D.label(self.screen, f, PLAYER_NAMES[p], midbottom=r.midbottom)
+            if p == h:
+                D.polygon(self.screen, ST.OUTLINE, [(x, r.y - 1), (x - 7, r.y - 10), (x + 7, r.y - 10)])
+                D.polygon(self.screen, (255, 255, 255), [(x, r.y - 4), (x - 4, r.y - 9), (x + 4, r.y - 9)])
+            mate = self.human_is_imp and p in w.imps and p != h
+            if (self.god and p in w.imps) or mate:   # imposteurs (vue debug) ou votre partenaire : pastille rouge
+                ST.ocircle(self.screen, ST.RED, (r.right + 8, r.centery), 6, 2)
+
     # ------------------------------------------------------------------------ HUD
     def panel(self, rect, alpha=None, color=None):
         """Panneau d'interface : aplat clair (ou `color`) cerné de noir."""
@@ -562,15 +614,18 @@ class RTApp(UIBase):
         if progress:
             D.arc(self.screen, ST.GREEN, (cx - r + 6, cy - r + 6, 2 * r - 12, 2 * r - 12),
                             math.pi / 2 - 2 * math.pi * min(1.0, progress), math.pi / 2, 7)
+        ss = 12                                 # le sous-titre doit tenir dans le bouton
+        while sub and ss > 9 and self.font(ss, True).size(sub)[0] > 2 * r - 16:
+            ss -= 1
         if active and sum(col) > 600:          # bouton clair : texte foncé, sans contour
             self.text(label, (cx, cy - (6 if sub else 0)), 30 if big else 17, ST.INK, True, center=True)
             if sub:
-                self.text(sub, (cx, cy + 18), 12, ST.MUTED, True, center=True)
+                self.text(sub, (cx, cy + 18), ss, ST.MUTED, True, center=True)
             return
         tc = (255, 255, 255) if active else (205, 210, 222)
         self.otext(label, (cx, cy - (6 if sub else 0)), 30 if big else 17, tc, center=True)
         if sub:
-            self.otext(sub, (cx, cy + 18), 12, tc, center=True, width=1)
+            self.otext(sub, (cx, cy + 18), ss, tc, center=True, width=1)
 
     def draw_hud(self):
         w, h = self.world, self.human
@@ -672,7 +727,7 @@ class RTApp(UIBase):
         # bouton d'urgence (dans la Cafétéria seulement)
         if w.room[self.human] == 0 and w.emergencies_left[self.human] > 0:
             ok = w.human_can_emergency()
-            wait = max(0, int(w.rt.emergency_cooldown - (w.time - w.last_meeting_t)))
+            wait = int(math.ceil(w.emergency_wait()))
             self.round_button(self.btn_emergency, "URGENCE", "[U]" if ok else f"dans {wait} s", ok, (232, 90, 60),
                               self.btn_emergency.collidepoint(mouse))
 
@@ -693,7 +748,7 @@ class RTApp(UIBase):
                 links = M.VENT_LINKS[w.room[h]]
                 sub = "vers " + ROOMS[links[w.vent_idx % len(links)]] + " [C]"
             else:
-                sub = "près d'une grille"
+                sub = "sur une grille"
             self.round_button(self.btn_vent, "CONDUIT", sub, can_v, (96, 110, 138), self.btn_vent.collidepoint(mouse))
             # sabotage des lumières
             can_s = w.can_sabotage()
@@ -708,7 +763,7 @@ class RTApp(UIBase):
         prog = None
         if near is not None:
             prog = (w.fix_prog / w.rt.fix_time) if w.near_fix(h) else w.work[h].get(near, 0.0) / w.rt.task_time
-        self.round_button(self.btn_use, "UTILISER", "[E] maintenir" if near is not None else "approchez-vous",
+        self.round_button(self.btn_use, "UTILISER", "[E] maintenir" if near is not None else "approchez",
                           near is not None, (245, 245, 245), self.btn_use.collidepoint(mouse), prog)
 
     def draw_big_map(self):

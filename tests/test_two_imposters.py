@@ -94,6 +94,25 @@ class TestTwoImposters(unittest.TestCase):
         self.assertIn(1, ctx.claims)
         self.assertNotIn(ctx.accuse.get(0), (0, 1))     # un imposteur n'accuse pas son partenaire
 
+    def test_imposters_vouch_for_each_other(self):
+        """Deux imposteurs qui disent avoir été dans la même salle se confirment l'un l'autre (mensonge)."""
+        w = world()
+        for q in range(w.n):
+            w.x[q], w.y[q] = M.task_stand(5)
+        w.x[1], w.y[1] = M.room_center(6)
+        w.x[2], w.y[2] = w.x[1] + 30, w.y[1]
+        w._update_rooms()
+        w.time = 20.0
+        w._observe()
+        w.do_kill(1, 2)
+        for i in (0, 1):
+            w.claim_callbacks[i] = lambda world, imp, ctx: (9, None)
+        w.vote_callbacks = {p: (lambda env, v, ctx: None) for p in range(w.n)}
+        w.start_meeting(3, emergency=True)
+        ctx = [e for e in w.events if e["type"] == "meeting"][-1]["ctx"]
+        self.assertIn(1, ctx.confirm[0])
+        self.assertIn(0, ctx.confirm[1])
+
     def test_partner_flags_and_masks(self):
         w = world()
         o = O.local_obs(w, 0)
