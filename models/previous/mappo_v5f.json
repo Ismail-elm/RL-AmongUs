@@ -1,0 +1,9 @@
+{
+  "iter": 500,
+  "games": 64000,
+  "hidden": 128,
+  "vote": "learned",
+  "players": "5+2",
+  "source": "v5a 1500 it + v5b 800 it (vote appris) + v5c 300 it (taches) + v5d 189 it + v5e 138 it + v5f 500 it (urgences, fins de partie, garants)",
+  "total_iters": 3427
+}

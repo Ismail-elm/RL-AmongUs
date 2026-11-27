@@ -477,7 +477,7 @@ class RTWorld(AmongUsEnv):
             return "imp", "timeout"
         return None
 
-    ENDGAMES = ((2, 1, 0.35), (3, 2, 0.25), (3, 1, 0.2), (4, 2, 0.2))   # (crewmates, imposteurs vivants, poids)
+    ENDGAMES = ((2, 1, 0.25), (3, 2, 0.2), (3, 1, 0.35), (4, 2, 0.2))   # (crewmates, imposteurs vivants, poids)
 
     def start_endgame(self, rng=None):
         """Fait démarrer la partie directement en FIN DE PARTIE (entraînement ciblé) : il ne reste que quelques

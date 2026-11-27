@@ -1,0 +1,8 @@
+{
+  "iter": 425,
+  "games": 54400,
+  "hidden": 128,
+  "vote": "learned",
+  "players": "5+2",
+  "source": "v5a..v5f puis v5g (425 it, fins de partie 3 contre 1, arr\u00eat automatique \u00e0 la convergence)"
+}

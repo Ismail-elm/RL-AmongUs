@@ -62,6 +62,19 @@ def evaluate(pool, crew_p, imp_p, rng, n=40, crew_v=None, imp_v=None, imp_c=None
     return res
 
 
+def strength_vs_anchor(pool, cur, anchor, seeds):
+    """Force des réseaux actuels contre une RÉFÉRENCE FIGÉE (les réseaux du début du run), sur des parties aux graines
+    fixes (mêmes parties à chaque mesure : la chance ne varie pas d'une mesure à l'autre). cur / anchor :
+    (crew, crew_vote, imp, imp_vote, imp_claim). -> (crew actuels vs imposteurs de référence, crew de référence vs
+    imposteurs actuels, force = moyenne des deux points de vue, 0,5 = pas de progrès)."""
+    def specs(c, i):
+        return [dict(seed=s, crew=("net", c[0]), crew_vote=("net", c[1]), imp=("net", i[2]), imp_vote=("net", i[3]),
+                     imp_claim=("net", i[4])) for s in seeds]
+    a = winrate(run_specs(pool, specs(cur, anchor), per=5)[0])
+    b = winrate(run_specs(pool, specs(anchor, cur), per=5)[0])
+    return a, b, 0.5 * (a + (1.0 - b))
+
+
 def add_snap(snaps, snap, it, every, recent=8, cap=24):
     """Ligue : garde les `recent` derniers snapshots, plus un ancien sur cinq (jusqu'à `cap` au total), pour que les
     réseaux continuent d'affronter des adversaires d'il y a longtemps et n'oublient pas comment les battre."""
@@ -92,6 +105,22 @@ def main():
     ap.add_argument("--endgame", type=float, default=0.0,
                     help="part des parties (réseau contre réseau) qui démarrent directement en fin de partie")
     ap.add_argument("--eval-every", type=int, default=20)
+    ap.add_argument("--auto-stop", action="store_true",
+                    help="arrêter quand l'entraînement a convergé (plus de progrès contre une référence figée)")
+    ap.add_argument("--conv-every", type=int, default=25, help="arrêt automatique : mesure toutes les N itérations")
+    ap.add_argument("--conv-games", type=int, default=330, help="arrêt automatique : parties par mesure (et par camp)")
+    ap.add_argument("--conv-patience", type=int, default=4,
+                    help="arrêt automatique : nb de mesures consécutives sans progrès avant l'arrêt")
+    ap.add_argument("--conv-delta", type=float, default=0.02,
+                    help="arrêt automatique : progrès minimal (en part de victoires) qui compte comme un progrès")
+    ap.add_argument("--min-iters", type=int, default=100, help="arrêt automatique : jamais avant cette itération")
+    ap.add_argument("--imp-exploiters", nargs="*", default=[],
+                    help="modèles .npz dont les IMPOSTEURS ont été entraînés à battre nos crewmates (--train imp) : "
+                         "ajoutés à demeure aux adversaires des crewmates")
+    ap.add_argument("--crew-exploiters", nargs="*", default=[],
+                    help="modèles .npz dont les CREWMATES ont été entraînés à battre nos imposteurs (--train crew)")
+    ap.add_argument("--exploiter-share", type=float, default=0.3,
+                    help="part des parties contre un adversaire ancien/scripté jouées contre un exploiteur")
     ap.add_argument("--out", default=os.path.join(HERE, "runs", "mappo"))
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--vote", choices=["learned", "scripted"], default="learned",
@@ -169,6 +198,33 @@ def main():
                      "good_eject", "wrong_eject", "skipped_votes", "crew_vote_ent", "imp_vote_ent", "imp_claim_ent",
                      "emergencies"])
     total = it0 * args.games
+    # arrêt automatique : référence figée = réseaux au début de ce run ; graines fixes pour des mesures comparables
+    conv = None
+    if args.auto_stop:
+        if not learn_vote:
+            raise SystemExit("--auto-stop demande le vote appris (--vote learned)")
+        anchor = (crew.actor_params(), crew_v.actor_params(), imp.actor_params(), imp_v.actor_params(),
+                  imp_c.actor_params())
+        conv = dict(anchor=anchor, seeds=[10 ** 8 + k for k in range(args.conv_games)], best=None, stale=0)
+        cf = open(os.path.join(args.out, "convergence.csv"), "a", newline="")
+        cw = csv.writer(cf)
+        cw.writerow(["iter", "crew_vs_anchor_imp", "anchor_crew_vs_imp", "strength", "best", "stale"])
+    stop_reason = None
+    # exploiteurs : réseaux entraînés spécialement pour battre une version figée de nos réseaux (comme les « league
+    # exploiters » d'AlphaStar). Les garder comme adversaires force les réseaux à corriger les failles trouvées.
+    extra_crew, extra_imp = [], []
+    if args.imp_exploiters or args.crew_exploiters:
+        from amongus.ai.policy import load_actors, load_claim_actor, load_vote_actors
+        for f in args.crew_exploiters:
+            ca_, _ = load_actors(f)
+            cv_, _ = load_vote_actors(f)
+            extra_crew.append((ca_.params, cv_.params if cv_ else None, None))
+        for f in args.imp_exploiters:
+            _, ia_ = load_actors(f)
+            _, iv_ = load_vote_actors(f)
+            ic_ = load_claim_actor(f)
+            extra_imp.append((ia_.params, iv_.params if iv_ else None, ic_.params if ic_ else None))
+        print(f"exploiteurs : {len(extra_imp)} imposteur(s), {len(extra_crew)} équipe(s) de crewmates", flush=True)
     for it in range(it0 + 1, args.iters + 1):
         frac = it / args.iters
         lr = args.lr + (args.lr_end - args.lr) * frac
@@ -179,8 +235,11 @@ def main():
         icp = imp_c.actor_params() if learn_vote else None
         cv, iv, ic = ("net", cvp), ("net", ivp), ("net", icp)
 
-        def opp(snaps, scripts):
-            """-> (déplacement, vote, déclaration) d'un adversaire : ancien snapshot ou bot scripté."""
+        def opp(snaps, scripts, extras=()):
+            """-> (déplacement, vote, déclaration) d'un adversaire : exploiteur, ancien snapshot ou bot scripté."""
+            if extras and rng.random() < args.exploiter_share:
+                act, vote, claim = rng.choice(extras)
+                return ("net", act), ("net", vote), ("net", claim)
             if snaps and rng.random() < 0.5:
                 act, vote, claim = snap_parts(rng.choice(snaps))
                 return ("net", act), ("net", vote), ("net", claim)
@@ -197,11 +256,11 @@ def main():
                 specs.append(dict(seed=seed, crew=("net", cp), imp=("net", ip), crew_vote=cv, imp_vote=iv, imp_claim=ic,
                                   rec_crew=True, rec_imp=True, tag="self"))
             elif u < 0.77:
-                o, ov, oc_ = opp(snaps_imp, SCRIPT_IMP)
+                o, ov, oc_ = opp(snaps_imp, SCRIPT_IMP, extra_imp)
                 specs.append(dict(seed=seed, crew=("net", cp), imp=o, crew_vote=cv, imp_vote=ov, imp_claim=oc_,
                                   rec_crew=True, tag="vs_imp_opp"))
             else:
-                o, ov, _ = opp(snaps_crew, SCRIPT_CREW)
+                o, ov, _ = opp(snaps_crew, SCRIPT_CREW, extra_crew)
                 specs.append(dict(seed=seed, crew=o, imp=("net", ip), crew_vote=ov, imp_vote=iv, imp_claim=ic,
                                   rec_imp=True, tag="vs_crew_opp"))
         t0 = time.time()
@@ -250,11 +309,32 @@ def main():
         if it % 25 == 0:
             save_actors(os.path.join(args.out, f"ckpt_{it:04d}.npz"), crew.actor_params(), imp.actor_params(),
                         meta=meta, **votes)
-        if it % 5 == 0 or it == args.iters:
+        if conv is not None and it % args.conv_every == 0:
+            a, b, sc = strength_vs_anchor(pool, (crew.actor_params(), crew_v.actor_params(), imp.actor_params(),
+                                                 imp_v.actor_params(), imp_c.actor_params()), conv["anchor"],
+                                          conv["seeds"])
+            if conv["best"] is None or sc > conv["best"] + args.conv_delta:
+                conv["best"], conv["stale"] = max(sc, conv["best"] or 0.0), 0
+            else:
+                conv["stale"] += 1
+            cw.writerow([it, round(a, 3), round(b, 3), round(sc, 3), round(conv["best"], 3), conv["stale"]])
+            cf.flush()
+            print(f"   convergence : crew actuels vs imposteurs de référence {a:.2f}, crew de référence vs imposteurs "
+                  f"actuels {b:.2f} -> force {sc:.3f} (niveau du dernier progrès net {conv['best']:.3f}, sans progrès depuis "
+                  f"{conv['stale']} mesure(s))", flush=True)
+            if conv["stale"] >= args.conv_patience and it >= args.min_iters:
+                stop_reason = (f"convergence : pas de progrès de plus de {args.conv_delta:.2f} contre la référence "
+                               f"depuis {conv['stale']} mesures ({conv['stale'] * args.conv_every} itérations)")
+        if it % 5 == 0 or it == args.iters or stop_reason:
             torch.save(dict(crew=crew.state(), imp=imp.state(), snaps_crew=snaps_crew, snaps_imp=snaps_imp, it=it,
                             crew_vote=crew_v.state() if learn_vote else None,
                             imp_vote=imp_v.state() if learn_vote else None,
                             imp_claim=imp_c.state() if learn_vote else None), ck)
+        if stop_reason:
+            print(f"ARRÊT à l'itération {it} — {stop_reason}", flush=True)
+            with open(os.path.join(args.out, "stop.txt"), "w", encoding="utf-8") as fh:
+                fh.write(f"iteration {it}\n{stop_reason}\n")
+            break
     pool.close()
 
 
